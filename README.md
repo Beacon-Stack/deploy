@@ -1,93 +1,121 @@
 # Beacon Stack — Deploy
 
-Docker Compose deployment for the Beacon media management stack.
+Docker Compose deployment for the full Beacon media management stack. Clone, configure, run one command.
 
-[Website](https://beaconstack.io) | [Pulse](https://github.com/beacon-stack/pulse) | [Pilot](https://github.com/beacon-stack/pilot) | [Prism](https://github.com/beacon-stack/prism) | [Haul](https://github.com/beacon-stack/haul)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docker required](https://img.shields.io/badge/Docker-24%2B-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/get-docker/)
+[![beaconstack.io](https://img.shields.io/badge/beaconstack.io-website-4f46e5)](https://beaconstack.io)
+
+[Quick start](#quick-start) · [Services](#services) · [Configuration](#configuration) · [VPN](#vpn-configuration) · [Troubleshooting](#troubleshooting)
 
 ---
 
-This repo contains a single `docker-compose.yml` that wires up the full Beacon stack: Postgres, Pulse (control plane), Pilot (TV), Prism (movies), Haul (BitTorrent), and Gluetun (VPN tunnel). Clone it, edit two files, run one command.
+## What's in the stack
 
-```
-                    ┌─────────────┐
-                    │   Postgres  │
-                    │   :5432     │
-                    └──────┬──────┘
-                           │
-                    ┌──────▼──────┐
-                    │    Pulse    │
-                    │   :9696     │
-                    │ control     │
-                    │   plane     │
-                    └──┬──────┬───┘
-             registers │      │ registers
-                ┌──────▼──┐ ┌─▼───────┐
-                │  Pilot  │ │  Prism  │
-                │  :8383  │ │  :8282  │
-                │   (TV)  │ │(movies) │
-                └────┬────┘ └────┬────┘
-                     │           │
-                     └─────┬─────┘
-                      grab │ torrent
-                  ┌────────▼────────┐
-                  │ ╔══════════════╗│
-                  │ ║  VPN tunnel  ║│
-                  │ ║  (Gluetun)   ║│
-                  │ ╠══════════════╣│
-                  │ ║    Haul      ║│
-                  │ ║    :8484     ║│
-                  │ ╚══════════════╝│
-                  └─────────────────┘
+| Service | Purpose |
+|---|---|
+| **Postgres** | Shared database for all Beacon apps |
+| **Pulse** | Control plane — manages indexers, quality profiles, and settings shared across all apps |
+| **Pilot** | TV series manager — monitors episodes, scores releases, and kicks off grabs |
+| **Prism** | Movie collection manager — edition-aware release scoring, Radarr v3 API compatible |
+| **Haul** | BitTorrent client with stall detection and a VPN-aware dashboard |
+| **Gluetun** | VPN tunnel — wraps Haul's network traffic, supports 30+ providers |
+
+### Data flow
+
+```mermaid
+graph TD
+    PG[(Postgres\n:5432)]
+    PG --> PULSE
+
+    PULSE[Pulse\n:9696\ncontrol plane]
+
+    PILOT[Pilot\n:8383\nTV series] -->|registers| PULSE
+    PRISM[Prism\n:8282\nmovies] -->|registers| PULSE
+
+    PILOT -->|grab torrent| HAUL
+    PRISM -->|grab torrent| HAUL
+
+    subgraph VPN tunnel [VPN tunnel — Gluetun]
+        HAUL[Haul\n:8484\nBitTorrent]
+    end
 ```
 
-## Prerequisites
+Pulse is the hub. Pilot and Prism register with it on startup and pull shared indexers and quality profiles. When either app grabs a release, the torrent goes to Haul, which runs inside the Gluetun VPN tunnel.
 
-- Docker Engine 24+ and Docker Compose v2.20+
-- A VPN subscription (recommended for Haul; [can be disabled](#disabling-vpn))
-- At least 2 GB of available RAM
+---
 
 ## Quick start
 
+**Prerequisites:** Docker Engine 24+ and Docker Compose v2.20+, a VPN subscription ([or disable it](#disabling-vpn)), 2 GB available RAM.
+
+**1. Clone this repo**
+
 ```bash
-# 1. Clone this repo
 git clone https://github.com/beacon-stack/deploy.git
 cd deploy
+```
 
-# 2. Copy and edit the environment file
+**2. Copy and edit the environment file**
+
+```bash
 cp .env.example .env
-# Open .env and set your VPN provider, server region, and media paths.
+```
 
-# 3. Copy and edit the secret files
+Open `.env` and set your VPN provider, server region, and media paths. The file has comments on every variable.
+
+**3. Copy and edit the secret files**
+
+```bash
 cp secrets/pg-password.txt.example secrets/pg-password.txt
 cp secrets/vpn-username.txt.example secrets/vpn-username.txt
 cp secrets/vpn-password.txt.example secrets/vpn-password.txt
-# Replace the placeholder text in each file with your real values.
+```
 
-# 4. Start the stack
+Replace the placeholder text in each file with your real values. No trailing newlines — use `echo -n "value" > secrets/file.txt` or a text editor that doesn't append one.
+
+**4. Start the stack**
+
+```bash
 docker compose up -d
+```
 
-# 5. Check that everything is healthy
+**5. Verify everything is healthy**
+
+```bash
 docker compose ps
 ```
 
-Once all services show `healthy`, open the web UIs:
+What to expect: containers will start in dependency order. The VPN tunnel typically takes 30–60 seconds to establish before Haul comes up. Health checks run every 30 seconds. Once all services show `healthy`, the stack is ready.
 
-| Service | URL | Purpose |
-|---|---|---|
-| Pulse | http://localhost:9696 | Control plane — manage shared indexers, quality profiles, and settings |
-| Pilot | http://localhost:8383 | TV series management — add shows, monitor episodes, grab releases |
-| Prism | http://localhost:8282 | Movie collection — add movies, edition-aware scoring, Radarr v3 API |
-| Haul | http://localhost:8484 | BitTorrent client — downloads, stall detection, VPN-aware dashboard |
+---
+
+## Services
+
+| Service | Purpose | Default port | URL |
+|---|---|---|---|
+| Pulse | Control plane — indexers, quality profiles, shared settings | 9696 | [localhost:9696](http://localhost:9696) |
+| Pilot | TV series management | 8383 | [localhost:8383](http://localhost:8383) |
+| Prism | Movie collection management | 8282 | [localhost:8282](http://localhost:8282) |
+| Haul | BitTorrent client | 8484 | [localhost:8484](http://localhost:8484) |
 
 Each app generates an API key on first run. Find it in the app's Settings page.
 
+---
+
 ## Connecting the apps
 
-After first startup:
+After first startup, two things need to be wired up manually:
 
-1. **Add Haul as a download client in Pilot and Prism.** In each app's Settings, add a download client with URL `http://vpn:8484` and the API key from Haul's settings page. The URL is `vpn` (not `haul`) because Haul runs inside the VPN container's network namespace.
+**1. Add Haul as a download client in Pilot and Prism.**
 
-2. **Indexers and quality profiles are shared automatically.** If Pulse is running, Pilot and Prism registered with it on startup. Add indexers in Pulse's web UI and they flow to every subscribed service.
+In each app's Settings, add a download client with URL `http://vpn:8484` and the API key from Haul's Settings page. The hostname is `vpn` (not `haul`) because Haul runs inside the VPN container's network namespace and is only reachable through it.
+
+**2. Indexers and quality profiles flow automatically through Pulse.**
+
+If Pulse is running, Pilot and Prism registered with it on startup. Add your indexers in Pulse's web UI and they are available to every subscribed service immediately.
+
+---
 
 ## Configuration
 
@@ -97,7 +125,7 @@ All configurable values live in `.env`. The file is organized by service with co
 
 ### Docker secrets
 
-Passwords are stored in `secrets/*.txt` files, not in `.env`. Docker mounts these files into containers at `/run/secrets/` and they never appear in `docker inspect` output or the process environment.
+Passwords are stored in `secrets/*.txt` files, not in `.env`. Docker mounts these files into containers at `/run/secrets/` — they never appear in `docker inspect` output or the process environment.
 
 | File | What goes in it |
 |---|---|
@@ -105,23 +133,21 @@ Passwords are stored in `secrets/*.txt` files, not in `.env`. Docker mounts thes
 | `secrets/vpn-username.txt` | VPN username (OpenVPN) |
 | `secrets/vpn-password.txt` | VPN password (OpenVPN) |
 
-Each file must contain only the secret value with no trailing newline. Use `echo -n "mypassword" > secrets/pg-password.txt` or a text editor that doesn't append newlines.
-
 ### Database passwords
 
-The per-app database passwords (pulse/pilot/prism/haul) are hardcoded in both `docker-compose.yml` (in the `DATABASE_DSN` environment variables) and `init-db.sql` (in the `CREATE USER` statements). The defaults are the app name as the password (e.g., `pulse`/`pulse`).
+The per-app database passwords (pulse/pilot/prism/haul) are set in two places: `docker-compose.yml` (the `DATABASE_DSN` environment variables) and `init-db.sql` (the `CREATE USER` statements). The defaults are the app name as the password — for example, user `pulse` with password `pulse`.
 
-If you want to change them, edit **both files** before the first `docker compose up`. After first run, Postgres has already initialized the users — changing passwords requires dropping the volume and re-initializing:
+To change them, edit **both files** before the first `docker compose up`. After the first run, Postgres has already initialized the users. Changing passwords at that point requires dropping the volume and re-initializing — all data is lost:
 
 ```bash
 docker compose down -v   # deletes pgdata — all data is lost
-# Edit init-db.sql and docker-compose.yml with new passwords
+# Edit init-db.sql and docker-compose.yml with the new passwords
 docker compose up -d
 ```
 
 ### Media paths
 
-The default paths are relative to the deploy directory (`./data/downloads`, `./data/tv`, `./data/movies`). This makes the stack self-contained. Power users can override them with absolute paths in `.env` for NAS mounts or existing media directories:
+The default paths are relative to the deploy directory (`./data/downloads`, `./data/tv`, `./data/movies`), which makes the stack self-contained out of the box. Override them in `.env` for NAS mounts or existing media directories:
 
 ```env
 DOWNLOADS_PATH=/mnt/nas/downloads
@@ -129,7 +155,9 @@ TV_PATH=/mnt/nas/media/tv
 MOVIES_PATH=/mnt/nas/media/movies
 ```
 
-Pilot, Prism, and Haul all mount `DOWNLOADS_PATH` so they can see completed downloads and import/hardlink them into the media directories.
+Pilot, Prism, and Haul all mount `DOWNLOADS_PATH` so they can see completed downloads and import or hardlink them into the media directories.
+
+---
 
 ## VPN configuration
 
@@ -190,7 +218,7 @@ If you don't need a VPN for torrent traffic, follow the instructions in the comm
 
 1. Comment out the entire `vpn` service block.
 2. On the `haul` service, remove `network_mode: service:vpn`, remove `vpn` from `depends_on`, remove `extra_hosts`.
-3. Add a `ports:` block to haul:
+3. Add a `ports:` block to the `haul` service:
    ```yaml
    ports:
      - "${HAUL_PORT:-8484}:8484"
@@ -199,17 +227,21 @@ If you don't need a VPN for torrent traffic, follow the instructions in the comm
    ```
 4. The VPN entries in `.env` and `secrets/` can be left as-is.
 
+---
+
 ## FlareSolverr
 
 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a Cloudflare challenge solver. It's useful if your indexers are behind Cloudflare's bot protection. Most users don't need it.
 
-To start it:
+To start it alongside the main stack:
 
 ```bash
 docker compose --profile flaresolverr up -d
 ```
 
 Then configure the URL in Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
+
+---
 
 ## Updating
 
@@ -219,6 +251,8 @@ docker compose up -d       # recreate containers with new images
 ```
 
 Each app handles its own database migrations on startup — no manual schema changes needed.
+
+---
 
 ## Troubleshooting
 
@@ -240,6 +274,8 @@ Each app handles its own database migrations on startup — no manual schema cha
 
 **Permission errors on bind-mounted volumes**
 - The Beacon app containers run as non-root users (UID 1000). Ensure the host directories in `DOWNLOADS_PATH`, `TV_PATH`, and `MOVIES_PATH` are writable by UID 1000, or adjust ownership: `sudo chown -R 1000:1000 ./data/`
+
+---
 
 ## Privacy
 
