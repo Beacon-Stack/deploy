@@ -1,0 +1,24 @@
+# Environment file (contains user-specific config)
+.env
+
+# Docker secret files (contain passwords)
+secrets/*.txt
+!secrets/*.txt.example
+
+# Runtime data created by the stack
+data/
+config/
+
+# Postgres data (if someone bind-mounts it instead of using the named volume)
+pgdata/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

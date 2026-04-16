@@ -1,0 +1,25 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env from example
+        run: cp .env.example .env
+
+      - name: Create secret files from examples
+        run: |
+          cp secrets/pg-password.txt.example secrets/pg-password.txt
+          cp secrets/vpn-username.txt.example secrets/vpn-username.txt
+          cp secrets/vpn-password.txt.example secrets/vpn-password.txt
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet

@@ -1,0 +1,311 @@
+# ============================================================================
+# Beacon Stack — All-in-one media management
+# https://beaconstack.io
+#
+# Quick start:
+#   1. cp .env.example .env && edit .env
+#   2. cp secrets/*.txt.example secrets/*.txt && edit each file
+#   3. docker compose up -d
+#
+# Profiles:
+#   default        → postgres, pulse, pilot, prism, vpn + haul
+#   flaresolverr   → docker compose --profile flaresolverr up -d
+# ============================================================================
+
+secrets:
+  pg-password:
+    file: ./secrets/pg-password.txt
+  vpn-username:
+    file: ./secrets/vpn-username.txt
+  vpn-password:
+    file: ./secrets/vpn-password.txt
+
+volumes:
+  pgdata:
+
+services:
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL — shared database server
+  #
+  # Each Beacon app gets its own database and user, created by init-db.sql
+  # on first run. Data is persisted in the 'pgdata' named volume.
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    container_name: beacon-postgres
+    restart: unless-stopped
+    secrets:
+      - pg-password
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg-password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # Pulse — control plane
+  #
+  # Service registry, shared indexer management, quality profiles, and
+  # cross-service settings. Pilot, Prism, and Haul register with Pulse on
+  # startup and pull shared configuration from it.
+  #
+  # Web UI: http://localhost:9696
+  # API docs: http://localhost:9696/api/docs
+  # --------------------------------------------------------------------------
+  pulse:
+    image: ghcr.io/beacon-stack/pulse:latest
+    container_name: beacon-pulse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PULSE_DATABASE_DRIVER: postgres
+      PULSE_DATABASE_DSN: postgres://pulse:pulse@postgres:5432/pulse_db?sslmode=disable
+      PULSE_LOG_LEVEL: ${PULSE_LOG_LEVEL:-info}
+      PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-}
+    ports:
+      - "${PULSE_PORT:-9696}:9696"
+    volumes:
+      - ${PULSE_CONFIG_PATH:-./config/pulse}:/config
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9696/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # --------------------------------------------------------------------------
+  # Pilot — TV series manager
+  #
+  # Tracks a TV library via TMDB, polls indexers, grabs episodes through
+  # Haul, and files completed downloads into season folders. Registers with
+  # Pulse on startup to pull shared indexers and quality profiles.
+  #
+  # Web UI: http://localhost:8383
+  # API docs: http://localhost:8383/api/docs
+  # --------------------------------------------------------------------------
+  pilot:
+    image: ghcr.io/beacon-stack/pilot:latest
+    container_name: beacon-pilot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pulse:
+        condition: service_healthy
+    environment:
+      PILOT_DATABASE_DRIVER: postgres
+      PILOT_DATABASE_DSN: postgres://pilot:pilot@postgres:5432/pilot_db?sslmode=disable
+      PILOT_PULSE_URL: http://pulse:9696
+      PILOT_LOG_LEVEL: ${PILOT_LOG_LEVEL:-info}
+    ports:
+      - "${PILOT_PORT:-8383}:8383"
+    volumes:
+      - ${PILOT_CONFIG_PATH:-./config/pilot}:/config
+      - ${TV_PATH:-./data/tv}:/tv
+      - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8383/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # --------------------------------------------------------------------------
+  # Prism — movie collection manager
+  #
+  # Tracks a movie library via TMDB with edition-aware scoring, Radarr v3
+  # API compatibility (so Overseerr and Jellyseerr connect without
+  # modification), and one-click Radarr import. Registers with Pulse for
+  # shared indexers and quality profiles.
+  #
+  # Web UI: http://localhost:8282
+  # API docs: http://localhost:8282/api/docs
+  # --------------------------------------------------------------------------
+  prism:
+    image: ghcr.io/beacon-stack/prism:latest
+    container_name: beacon-prism
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pulse:
+        condition: service_healthy
+    environment:
+      PRISM_DATABASE_DRIVER: postgres
+      PRISM_DATABASE_DSN: postgres://prism:prism@postgres:5432/prism_db?sslmode=disable
+      PRISM_PULSE_URL: http://pulse:9696
+      PRISM_LOG_LEVEL: ${PRISM_LOG_LEVEL:-info}
+    ports:
+      - "${PRISM_PORT:-8282}:8282"
+    volumes:
+      - ${PRISM_CONFIG_PATH:-./config/prism}:/config
+      - ${MOVIES_PATH:-./data/movies}:/movies
+      - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8282/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # --------------------------------------------------------------------------
+  # VPN — Gluetun (https://github.com/qdm12/gluetun)
+  #
+  # Creates a VPN tunnel. Haul runs inside this container's network
+  # namespace (network_mode: service:vpn) so ALL torrent traffic — tracker
+  # announces, DHT, and peer-wire data — routes through the VPN tunnel.
+  #
+  # Because Haul shares this container's network stack, Haul's ports must
+  # be exposed HERE, not on the haul service. This is a Docker requirement:
+  # when a container uses network_mode: service:X, it cannot declare its
+  # own ports.
+  #
+  # Gluetun supports 30+ VPN providers. See:
+  #   https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers
+  #
+  # The default configuration below is for PIA (Private Internet Access)
+  # over OpenVPN. See the README for examples of other providers (Mullvad,
+  # NordVPN, Surfshark, ProtonVPN) and WireGuard configuration.
+  #
+  # ┌─────────────────────────────────────────────────────────────────────┐
+  # │ TO DISABLE VPN                                                     │
+  # │                                                                    │
+  # │ 1. Comment out (or delete) this entire 'vpn' service block.        │
+  # │                                                                    │
+  # │ 2. On the 'haul' service below, make these changes:                │
+  # │    a. Remove the line:   network_mode: service:vpn                 │
+  # │    b. Remove 'vpn' from depends_on (keep the postgres entry).      │
+  # │    c. Remove the entire extra_hosts block.                         │
+  # │    d. Add these lines directly to haul:                            │
+  # │         ports:                                                     │
+  # │           - "${HAUL_PORT:-8484}:8484"                              │
+  # │           - "${HAUL_PEER_PORT:-6881}:6881/tcp"                     │
+  # │           - "${HAUL_PEER_PORT:-6881}:6881/udp"                     │
+  # │                                                                    │
+  # │ 3. The VPN entries in .env and secrets/ can be left as-is — they   │
+  # │    won't cause errors once the vpn service is removed.             │
+  # └─────────────────────────────────────────────────────────────────────┘
+  # --------------------------------------------------------------------------
+  vpn:
+    image: qmcgaw/gluetun:latest
+    container_name: beacon-vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    secrets:
+      - vpn-username
+      - vpn-password
+    environment:
+      # VPN provider — see https://github.com/qdm12/gluetun-wiki
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-private internet access}
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
+      # OpenVPN auth (read from Docker secrets)
+      OPENVPN_USER_SECRETFILE: /run/secrets/vpn-username
+      OPENVPN_PASSWORD_SECRETFILE: /run/secrets/vpn-password
+      # WireGuard auth — uncomment these and set VPN_TYPE=wireguard in .env
+      # WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:-}
+      # WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:-}
+      # Server region — provider-specific, comma-separated for multiple
+      SERVER_REGIONS: ${VPN_SERVER_REGIONS:-Netherlands}
+      # Port forwarding — PIA and ProtonVPN support this; improves speeds
+      VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING:-on}
+      VPN_PORT_FORWARDING_PROVIDER: ${VPN_PORT_FORWARDING_PROVIDER:-}
+      # Firewall — allow Haul's ports through
+      FIREWALL_VPN_INPUT_PORTS: ${HAUL_PEER_PORT:-6881}
+      FIREWALL_INPUT_PORTS: ${HAUL_PORT:-8484}
+    ports:
+      # Haul web UI — exposed here because Haul shares this network namespace
+      - "${HAUL_PORT:-8484}:8484"
+      # Haul peer-wire — for incoming torrent connections
+      - "${HAUL_PEER_PORT:-6881}:6881/tcp"
+      - "${HAUL_PEER_PORT:-6881}:6881/udp"
+    volumes:
+      - ${GLUETUN_CONFIG_PATH:-./config/gluetun}:/gluetun
+    # Docker's built-in DNS does not work for containers that use
+    # network_mode: service:X. Haul runs inside this network namespace, so
+    # it cannot resolve other compose service names (postgres, pulse) via
+    # Docker DNS. These entries inject the names into /etc/hosts so Haul
+    # can reach them. host-gateway resolves to the Docker host bridge IP
+    # automatically (requires Docker 20.10+).
+    extra_hosts:
+      - "postgres:host-gateway"
+      - "pulse:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # --------------------------------------------------------------------------
+  # Haul — BitTorrent client
+  #
+  # Runs inside the VPN container's network namespace so all torrent traffic
+  # goes through the tunnel. See the 'vpn' service comments above for
+  # details and instructions to disable VPN.
+  #
+  # Pilot and Prism send torrent grabs to Haul's /api/v1/torrents endpoint.
+  # Configure Haul as a download client in their web UIs:
+  #   URL: http://vpn:8484   (from Pilot/Prism's perspective)
+  #
+  # Web UI: http://localhost:8484
+  # --------------------------------------------------------------------------
+  haul:
+    image: ghcr.io/beacon-stack/haul:latest
+    container_name: beacon-haul
+    restart: unless-stopped
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      HAUL_DATABASE_DRIVER: postgres
+      HAUL_DATABASE_DSN: postgres://haul:haul@postgres:5432/haul_db?sslmode=disable
+      HAUL_PULSE_URL: http://pulse:9696
+      HAUL_TORRENT_LISTEN_PORT: ${HAUL_PEER_PORT:-6881}
+      HAUL_LOG_LEVEL: ${HAUL_LOG_LEVEL:-info}
+    volumes:
+      - ${HAUL_CONFIG_PATH:-./config/haul}:/config
+      - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8484/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # FlareSolverr — Cloudflare challenge solver (optional)
+  #
+  # Only starts when explicitly requested:
+  #   docker compose --profile flaresolverr up -d
+  #
+  # After starting, configure the URL in Pulse:
+  #   Settings → FlareSolverr URL → http://flaresolverr:8191
+  # --------------------------------------------------------------------------
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: beacon-flaresolverr
+    restart: unless-stopped
+    profiles:
+      - flaresolverr
+    environment:
+      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${FLARESOLVERR_PORT:-8191}:8191"
