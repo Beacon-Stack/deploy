@@ -288,6 +288,26 @@ Each app handles its own database migrations on startup — no manual schema cha
 
 ---
 
+## Development
+
+To run the stack against locally-built images from sibling service repos (`pulse/`, `pilot/`, `prism/`, `haul/` under `dev/beacon/`), use the dev override:
+
+```bash
+cp .env.dev.example .env
+./setup-secrets.sh
+docker compose up -d --build
+```
+
+`docker-compose.dev.yml` adds `build: ../<repo>` to each service; `.env.dev.example` points config and media paths at `~/.config/*` and `/opt/media/*`. The `COMPOSE_FILE` line in `.env.dev.example` auto-applies the override on every `docker compose` invocation.
+
+Rebuild a single service after local changes:
+
+```bash
+docker compose build pilot && docker compose up -d pilot
+```
+
+To fall back to the published images, swap `.env` back to `.env.example`.
+
 ## Privacy
 
 No telemetry, no analytics, no crash reporting, no update checks. Every Beacon app makes outbound connections only to services you explicitly configure: TMDB for metadata, your indexers, your download clients, your media servers, and your VPN tunnel. Credentials stay in your local database and Docker secrets.
