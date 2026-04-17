@@ -62,6 +62,7 @@ services:
       - pg-password
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/pg-password
+      TZ: ${TZ:-UTC}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
@@ -99,6 +100,7 @@ services:
       PULSE_DATABASE_DSN: postgres://pulse:pulse@postgres:5432/pulse_db?sslmode=disable
       PULSE_LOG_LEVEL: ${PULSE_LOG_LEVEL:-info}
       PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-}
+      TZ: ${TZ:-UTC}
     networks:
       - beacon-net
     ports:
@@ -137,6 +139,7 @@ services:
       PILOT_DATABASE_DSN: postgres://pilot:pilot@postgres:5432/pilot_db?sslmode=disable
       PILOT_PULSE_URL: http://pulse:9696
       PILOT_LOG_LEVEL: ${PILOT_LOG_LEVEL:-info}
+      TZ: ${TZ:-UTC}
     networks:
       - beacon-net
     ports:
@@ -178,6 +181,7 @@ services:
       PRISM_DATABASE_DSN: postgres://prism:prism@postgres:5432/prism_db?sslmode=disable
       PRISM_PULSE_URL: http://pulse:9696
       PRISM_LOG_LEVEL: ${PRISM_LOG_LEVEL:-info}
+      TZ: ${TZ:-UTC}
     networks:
       - beacon-net
     ports:
@@ -264,6 +268,7 @@ services:
       # Allow Haul (sharing this namespace) to reach Postgres and Pulse on
       # the Docker bridge without routing through the VPN tunnel.
       FIREWALL_OUTBOUND_SUBNETS: 172.28.0.0/16
+      TZ: ${TZ:-UTC}
     networks:
       - beacon-net
     ports:
@@ -311,6 +316,7 @@ services:
       HAUL_PULSE_URL: http://pulse:9696
       HAUL_TORRENT_LISTEN_PORT: ${HAUL_PEER_PORT:-6881}
       HAUL_LOG_LEVEL: ${HAUL_LOG_LEVEL:-info}
+      TZ: ${TZ:-UTC}
     volumes:
       - ${HAUL_CONFIG_PATH:-./config/haul}:/config
       - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
