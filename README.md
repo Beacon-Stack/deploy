@@ -25,23 +25,24 @@ Docker Compose deployment for the full Beacon media management stack. Clone, con
 
 ```mermaid
 graph TD
-    PG[(Postgres\n:5432)]
+    PG[("Postgres<br/>:5432")]
     PG --> PULSE
 
-    PULSE[Pulse\n:9696\ncontrol plane]
+    PULSE["Pulse<br/>:9696<br/>control plane"]
 
-    PILOT[Pilot\n:8383\nTV series] -->|registers| PULSE
-    PRISM[Prism\n:8282\nmovies] -->|registers| PULSE
+    PILOT["Pilot<br/>:8383<br/>TV series"] -->|registers| PULSE
+    PRISM["Prism<br/>:8282<br/>movies"] -->|registers| PULSE
 
     PILOT -->|grab torrent| HAUL
     PRISM -->|grab torrent| HAUL
 
     subgraph VPN tunnel [VPN tunnel — Gluetun]
-        HAUL[Haul\n:8484\nBitTorrent]
+        HAUL["Haul<br/>:8484<br/>BitTorrent"]
     end
+    HAUL -->|registers| PULSE
 ```
 
-Pulse is the hub. Pilot and Prism register with it on startup and pull shared indexers and quality profiles. When either app grabs a release, the torrent goes to Haul, which runs inside the Gluetun VPN tunnel.
+Pulse is the hub. Pilot, Prism, and Haul all register with it on startup and pull shared indexers and quality profiles. When Pilot or Prism grabs a release, the torrent goes to Haul, which runs inside the Gluetun VPN tunnel by default.
 
 ---
 
