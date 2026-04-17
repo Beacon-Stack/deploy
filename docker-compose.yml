@@ -10,6 +10,10 @@
 # Profiles:
 #   default        → postgres, pulse, pilot, prism, vpn + haul
 #   flaresolverr   → docker compose --profile flaresolverr up -d
+#
+# Internal network:
+#   All services share the 'beacon-net' user-defined bridge (172.28.0.0/16).
+#   Postgres is not published to the host by default.
 # ============================================================================
 
 secrets:
@@ -19,6 +23,13 @@ secrets:
     file: ./secrets/vpn-username.txt
   vpn-password:
     file: ./secrets/vpn-password.txt
+
+networks:
+  beacon-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
 
 volumes:
   pgdata:
@@ -30,6 +41,9 @@ services:
   #
   # Each Beacon app gets its own database and user, created by init-db.sql
   # on first run. Data is persisted in the 'pgdata' named volume.
+  #
+  # Not published to the host by default — apps reach it over the internal
+  # 'beacon-net' bridge. Uncomment the 'ports:' block below to expose it.
   # --------------------------------------------------------------------------
   postgres:
     image: postgres:17-alpine
@@ -42,8 +56,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - beacon-net
+    # ports:
+    #   - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -73,6 +89,8 @@ services:
       PULSE_DATABASE_DSN: postgres://pulse:pulse@postgres:5432/pulse_db?sslmode=disable
       PULSE_LOG_LEVEL: ${PULSE_LOG_LEVEL:-info}
       PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-}
+    networks:
+      - beacon-net
     ports:
       - "${PULSE_PORT:-9696}:9696"
     volumes:
@@ -108,6 +126,8 @@ services:
       PILOT_DATABASE_DSN: postgres://pilot:pilot@postgres:5432/pilot_db?sslmode=disable
       PILOT_PULSE_URL: http://pulse:9696
       PILOT_LOG_LEVEL: ${PILOT_LOG_LEVEL:-info}
+    networks:
+      - beacon-net
     ports:
       - "${PILOT_PORT:-8383}:8383"
     volumes:
@@ -146,6 +166,8 @@ services:
       PRISM_DATABASE_DSN: postgres://prism:prism@postgres:5432/prism_db?sslmode=disable
       PRISM_PULSE_URL: http://pulse:9696
       PRISM_LOG_LEVEL: ${PRISM_LOG_LEVEL:-info}
+    networks:
+      - beacon-net
     ports:
       - "${PRISM_PORT:-8282}:8282"
     volumes:
@@ -226,6 +248,11 @@ services:
       # Firewall — allow Haul's ports through
       FIREWALL_VPN_INPUT_PORTS: ${HAUL_PEER_PORT:-6881}
       FIREWALL_INPUT_PORTS: ${HAUL_PORT:-8484}
+      # Allow Haul (sharing this namespace) to reach Postgres and Pulse on
+      # the Docker bridge without routing through the VPN tunnel.
+      FIREWALL_OUTBOUND_SUBNETS: 172.28.0.0/16
+    networks:
+      - beacon-net
     ports:
       # Haul web UI — exposed here because Haul shares this network namespace
       - "${HAUL_PORT:-8484}:8484"
@@ -234,15 +261,6 @@ services:
       - "${HAUL_PEER_PORT:-6881}:6881/udp"
     volumes:
       - ${GLUETUN_CONFIG_PATH:-./config/gluetun}:/gluetun
-    # Docker's built-in DNS does not work for containers that use
-    # network_mode: service:X. Haul runs inside this network namespace, so
-    # it cannot resolve other compose service names (postgres, pulse) via
-    # Docker DNS. These entries inject the names into /etc/hosts so Haul
-    # can reach them. host-gateway resolves to the Docker host bridge IP
-    # automatically (requires Docker 20.10+).
-    extra_hosts:
-      - "postgres:host-gateway"
-      - "pulse:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:8000 || exit 1"]
       interval: 30s
@@ -307,5 +325,7 @@ services:
     environment:
       LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
       TZ: ${TZ:-UTC}
+    networks:
+      - beacon-net
     ports:
       - "${FLARESOLVERR_PORT:-8191}:8191"

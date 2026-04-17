@@ -262,15 +262,16 @@ Each app handles its own database migrations on startup — no manual schema cha
 - Check Gluetun logs: `docker compose logs vpn`
 
 **Haul can't reach Postgres or Pulse**
-- This is usually a DNS resolution issue inside the VPN namespace. The `extra_hosts` entries on the vpn service inject `postgres` and `pulse` into `/etc/hosts` via `host-gateway`. Verify Docker 20.10+ is installed (`docker version`)
-- Check that Postgres and Pulse ports are published on the host (they are by default)
+- Haul shares the vpn container's network namespace. The vpn container is attached to the internal `beacon-net` bridge, and `FIREWALL_OUTBOUND_SUBNETS=172.28.0.0/16` on Gluetun allows outbound traffic to that subnet so Haul can reach `postgres` and `pulse` by service name without going through the tunnel.
+- If you've changed the `beacon-net` subnet in `docker-compose.yml`, update `FIREWALL_OUTBOUND_SUBNETS` to match.
+- Check Gluetun logs for firewall denials: `docker compose logs vpn | grep -i firewall`
 
 **Database initialization failed**
 - If the `pgdata` volume already exists from a previous run with different passwords, drop it: `docker compose down -v && docker compose up -d`
 - Check Postgres logs: `docker compose logs postgres`
 
 **Port conflicts**
-- If another service already uses port 5432, 9696, 8383, 8282, or 8484, change the corresponding `*_PORT` variable in `.env`
+- If another service already uses port 9696, 8383, 8282, or 8484, change the corresponding `*_PORT` variable in `.env`. Postgres is not published to the host by default; enabling the optional `ports:` block in `docker-compose.yml` brings `POSTGRES_PORT` into play.
 
 **Permission errors on bind-mounted volumes**
 - The Beacon app containers run as non-root users (UID 1000). Ensure the host directories in `DOWNLOADS_PATH`, `TV_PATH`, and `MOVIES_PATH` are writable by UID 1000, or adjust ownership: `sudo chown -R 1000:1000 ./data/`
