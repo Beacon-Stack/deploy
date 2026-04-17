@@ -110,7 +110,12 @@ After first startup, two things need to be wired up manually:
 
 **1. Add Haul as a download client in Pilot and Prism.**
 
-In each app's Settings, add a download client with URL `http://vpn:8484` and the API key from Haul's Settings page. The hostname is `vpn` (not `haul`) because Haul runs inside the VPN container's network namespace and is only reachable through it.
+In each app's Settings, add a download client with the URL that matches your profile, plus the API key from Haul's Settings page:
+
+| Profile | Download-client URL |
+|---|---|
+| `vpn` (default) | `http://vpn:8484` — Haul shares the Gluetun network namespace, so it's reachable at the `vpn` hostname. |
+| `novpn` | `http://haul-direct:8484` — Haul is attached to the bridge directly. |
 
 **2. Indexers and quality profiles flow automatically through Pulse.**
 
@@ -215,18 +220,15 @@ VPN port forwarding allows incoming torrent connections, which improves download
 
 ### Disabling VPN
 
-If you don't need a VPN for torrent traffic, follow the instructions in the comment block above the `vpn` service in `docker-compose.yml`. The short version:
+Change the active profile in `.env`:
 
-1. Comment out the entire `vpn` service block.
-2. On the `haul` service, remove `network_mode: service:vpn`, remove `vpn` from `depends_on`, remove `extra_hosts`.
-3. Add a `ports:` block to the `haul` service:
-   ```yaml
-   ports:
-     - "${HAUL_PORT:-8484}:8484"
-     - "${HAUL_PEER_PORT:-6881}:6881/tcp"
-     - "${HAUL_PEER_PORT:-6881}:6881/udp"
-   ```
-4. The VPN entries in `.env` and `secrets/` can be left as-is.
+```env
+COMPOSE_PROFILES=novpn
+```
+
+Then `docker compose up -d`. The `vpn` service stops; a `haul-direct` service starts in its place with Haul's ports published directly on the host. Entries under `# --- VPN (Gluetun) ---` in `.env` and the `secrets/vpn-*.txt` files can be left as-is — they aren't read while `novpn` is active.
+
+Switching back is symmetric: `COMPOSE_PROFILES=vpn` and `docker compose up -d`.
 
 ---
 
@@ -234,13 +236,13 @@ If you don't need a VPN for torrent traffic, follow the instructions in the comm
 
 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a Cloudflare challenge solver. It's useful if your indexers are behind Cloudflare's bot protection. Most users don't need it.
 
-To start it alongside the main stack:
+To enable it alongside the main stack, add `flaresolverr` to the profile list in `.env`:
 
-```bash
-docker compose --profile flaresolverr up -d
+```env
+COMPOSE_PROFILES=vpn,flaresolverr
 ```
 
-Then configure the URL in Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
+Then `docker compose up -d` and configure the URL in Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
 
 ---
 

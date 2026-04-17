@@ -8,8 +8,10 @@
 #   3. docker compose up -d
 #
 # Profiles:
-#   default        → postgres, pulse, pilot, prism, vpn + haul
-#   flaresolverr   → docker compose --profile flaresolverr up -d
+#   Set COMPOSE_PROFILES in .env to choose a variant:
+#     COMPOSE_PROFILES=vpn          → default. Haul routed through Gluetun.
+#     COMPOSE_PROFILES=novpn        → Haul exposed directly on the host.
+#     COMPOSE_PROFILES=vpn,flaresolverr → add the FlareSolverr proxy.
 #
 # Internal network:
 #   All services share the 'beacon-net' user-defined bridge (172.28.0.0/16).
@@ -24,6 +26,31 @@ x-logging: &default-logging
   options:
     max-size: "10m"
     max-file: "3"
+
+# Shared Haul service config — referenced by both the VPN-tunneled and
+# direct-exposed variants below. The two variants differ only in their
+# network wiring (network_mode vs. ports) and depends_on.
+x-haul-common: &haul-common
+  image: ghcr.io/beacon-stack/haul:latest
+  container_name: beacon-haul
+  restart: unless-stopped
+  environment:
+    HAUL_DATABASE_DRIVER: postgres
+    HAUL_DATABASE_DSN: postgres://haul:haul@postgres:5432/haul_db?sslmode=disable
+    HAUL_PULSE_URL: http://pulse:9696
+    HAUL_TORRENT_LISTEN_PORT: ${HAUL_PEER_PORT:-6881}
+    HAUL_LOG_LEVEL: ${HAUL_LOG_LEVEL:-info}
+    TZ: ${TZ:-UTC}
+  volumes:
+    - ${HAUL_CONFIG_PATH:-./config/haul}:/config
+    - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
+  healthcheck:
+    test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8484/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 30s
+  logging: *default-logging
 
 secrets:
   pg-password:
@@ -217,28 +244,13 @@ services:
   # over OpenVPN. See the README for examples of other providers (Mullvad,
   # NordVPN, Surfshark, ProtonVPN) and WireGuard configuration.
   #
-  # ┌─────────────────────────────────────────────────────────────────────┐
-  # │ TO DISABLE VPN                                                     │
-  # │                                                                    │
-  # │ 1. Comment out (or delete) this entire 'vpn' service block.        │
-  # │                                                                    │
-  # │ 2. On the 'haul' service below, make these changes:                │
-  # │    a. Remove the line:   network_mode: service:vpn                 │
-  # │    b. Remove 'vpn' from depends_on (keep the postgres entry).      │
-  # │    c. Remove the entire extra_hosts block.                         │
-  # │    d. Add these lines directly to haul:                            │
-  # │         ports:                                                     │
-  # │           - "${HAUL_PORT:-8484}:8484"                              │
-  # │           - "${HAUL_PEER_PORT:-6881}:6881/tcp"                     │
-  # │           - "${HAUL_PEER_PORT:-6881}:6881/udp"                     │
-  # │                                                                    │
-  # │ 3. The VPN entries in .env and secrets/ can be left as-is — they   │
-  # │    won't cause errors once the vpn service is removed.             │
-  # └─────────────────────────────────────────────────────────────────────┘
+  # To deploy WITHOUT a VPN, set COMPOSE_PROFILES=novpn in .env instead of
+  # the default 'vpn'. See the README's "Disabling VPN" section.
   # --------------------------------------------------------------------------
   vpn:
     image: qmcgaw/gluetun:latest
     container_name: beacon-vpn
+    profiles: [vpn]
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
@@ -288,51 +300,55 @@ services:
     logging: *default-logging
 
   # --------------------------------------------------------------------------
-  # Haul — BitTorrent client
+  # Haul — BitTorrent client (VPN-tunneled variant)
   #
-  # Runs inside the VPN container's network namespace so all torrent traffic
-  # goes through the tunnel. See the 'vpn' service comments above for
-  # details and instructions to disable VPN.
+  # Active when COMPOSE_PROFILES contains 'vpn' (the default). Runs inside
+  # the vpn container's network namespace so all torrent traffic goes
+  # through the tunnel. Reaches Postgres and Pulse over the bridge network
+  # thanks to the vpn container's FIREWALL_OUTBOUND_SUBNETS allowance.
   #
-  # Pilot and Prism send torrent grabs to Haul's /api/v1/torrents endpoint.
-  # Configure Haul as a download client in their web UIs:
-  #   URL: http://vpn:8484   (from Pilot/Prism's perspective)
+  # Configure Haul as a download client in Pilot/Prism with URL
+  # http://vpn:8484 (the name "vpn" — Haul is only reachable through its
+  # namespace host).
   #
   # Web UI: http://localhost:8484
   # --------------------------------------------------------------------------
   haul:
-    image: ghcr.io/beacon-stack/haul:latest
-    container_name: beacon-haul
-    restart: unless-stopped
+    <<: *haul-common
+    profiles: [vpn]
     network_mode: service:vpn
     depends_on:
       vpn:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    environment:
-      HAUL_DATABASE_DRIVER: postgres
-      HAUL_DATABASE_DSN: postgres://haul:haul@postgres:5432/haul_db?sslmode=disable
-      HAUL_PULSE_URL: http://pulse:9696
-      HAUL_TORRENT_LISTEN_PORT: ${HAUL_PEER_PORT:-6881}
-      HAUL_LOG_LEVEL: ${HAUL_LOG_LEVEL:-info}
-      TZ: ${TZ:-UTC}
-    volumes:
-      - ${HAUL_CONFIG_PATH:-./config/haul}:/config
-      - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8484/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Haul — BitTorrent client (direct-exposed variant, no VPN)
+  #
+  # Active when COMPOSE_PROFILES=novpn. Attached to the bridge network
+  # directly and exposes its ports on the host. Torrent traffic is NOT
+  # tunneled — all connections go out the host's default network interface.
+  # Configure Haul as a download client with URL http://haul-direct:8484.
+  # --------------------------------------------------------------------------
+  haul-direct:
+    <<: *haul-common
+    profiles: [novpn]
+    networks:
+      - beacon-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${HAUL_PORT:-8484}:8484"
+      - "${HAUL_PEER_PORT:-6881}:6881/tcp"
+      - "${HAUL_PEER_PORT:-6881}:6881/udp"
 
   # --------------------------------------------------------------------------
   # FlareSolverr — Cloudflare challenge solver (optional)
   #
-  # Only starts when explicitly requested:
-  #   docker compose --profile flaresolverr up -d
+  # Only starts when 'flaresolverr' is in COMPOSE_PROFILES, e.g.:
+  #   COMPOSE_PROFILES=vpn,flaresolverr
   #
   # After starting, configure the URL in Pulse:
   #   Settings → FlareSolverr URL → http://flaresolverr:8191
