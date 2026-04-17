@@ -16,6 +16,15 @@
 #   Postgres is not published to the host by default.
 # ============================================================================
 
+# Log rotation defaults — applied to every service via YAML anchor.
+# Caps each service's logs at 30 MB total (10 MB × 3 files) so long-running
+# home deployments don't silently fill the host disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 secrets:
   pg-password:
     file: ./secrets/pg-password.txt
@@ -66,6 +75,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging: *default-logging
 
   # --------------------------------------------------------------------------
   # Pulse — control plane
@@ -101,6 +111,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    logging: *default-logging
 
   # --------------------------------------------------------------------------
   # Pilot — TV series manager
@@ -140,6 +151,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    logging: *default-logging
 
   # --------------------------------------------------------------------------
   # Prism — movie collection manager
@@ -180,6 +192,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    logging: *default-logging
 
   # --------------------------------------------------------------------------
   # VPN — Gluetun (https://github.com/qdm12/gluetun)
@@ -267,6 +280,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    logging: *default-logging
 
   # --------------------------------------------------------------------------
   # Haul — BitTorrent client
@@ -306,6 +320,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging: *default-logging
 
   # --------------------------------------------------------------------------
   # FlareSolverr — Cloudflare challenge solver (optional)
@@ -329,3 +344,4 @@ services:
       - beacon-net
     ports:
       - "${FLARESOLVERR_PORT:-8191}:8191"
+    logging: *default-logging
