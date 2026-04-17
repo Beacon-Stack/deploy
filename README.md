@@ -65,15 +65,15 @@ cp .env.example .env
 
 Open `.env` and set your VPN provider, server region, and media paths. The file has comments on every variable.
 
-**3. Copy and edit the secret files**
+**3. Generate database passwords and VPN credential placeholders**
 
 ```bash
-cp secrets/pg-password.txt.example secrets/pg-password.txt
-cp secrets/vpn-username.txt.example secrets/vpn-username.txt
-cp secrets/vpn-password.txt.example secrets/vpn-password.txt
+./setup-secrets.sh
 ```
 
-Replace the placeholder text in each file with your real values. No trailing newlines — use `echo -n "value" > secrets/file.txt` or a text editor that doesn't append one.
+The script writes strong random passwords to `secrets/pg-password.txt` and the four per-app files (`secrets/{pulse,pilot,prism,haul}-db-password.txt`), and places editable placeholders for `secrets/vpn-username.txt` and `secrets/vpn-password.txt`. Running it twice never overwrites an existing file.
+
+If you're using the vpn profile, open the two VPN credential files and replace the placeholders with your provider's OpenVPN username and password. No trailing newlines.
 
 **4. Start the stack**
 
@@ -136,18 +136,25 @@ Passwords are stored in `secrets/*.txt` files, not in `.env`. Docker mounts thes
 | File | What goes in it |
 |---|---|
 | `secrets/pg-password.txt` | Postgres superuser password |
+| `secrets/pulse-db-password.txt` | Password for the `pulse` database user |
+| `secrets/pilot-db-password.txt` | Password for the `pilot` database user |
+| `secrets/prism-db-password.txt` | Password for the `prism` database user |
+| `secrets/haul-db-password.txt` | Password for the `haul` database user |
 | `secrets/vpn-username.txt` | VPN username (OpenVPN) |
 | `secrets/vpn-password.txt` | VPN password (OpenVPN) |
 
+Each app reads its password from the corresponding file via the `*_DATABASE_PASSWORD_FILE` environment variable — the same convention used by Postgres's own `POSTGRES_PASSWORD_FILE`. Passwords never live inside `docker-compose.yml`.
+
 ### Database passwords
 
-The per-app database passwords (pulse/pilot/prism/haul) are set in two places: `docker-compose.yml` (the `DATABASE_DSN` environment variables) and `init-db.sql` (the `CREATE USER` statements). The defaults are the app name as the password — for example, user `pulse` with password `pulse`.
+Run `./setup-secrets.sh` once and the five database password files get filled with strong random values. The script is idempotent — running it again leaves existing files alone.
 
-To change them, edit **both files** before the first `docker compose up`. After the first run, Postgres has already initialized the users. Changing passwords at that point requires dropping the volume and re-initializing — all data is lost:
+If you need to change a password after the first run, Postgres has already baked the old one into the `pgdata` volume. Changing it requires dropping the volume and re-initializing — **all data is lost**:
 
 ```bash
 docker compose down -v   # deletes pgdata — all data is lost
-# Edit init-db.sql and docker-compose.yml with the new passwords
+rm secrets/pulse-db-password.txt   # or whichever password you're rotating
+./setup-secrets.sh
 docker compose up -d
 ```
 

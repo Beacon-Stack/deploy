@@ -15,11 +15,30 @@ jobs:
       - name: Create .env from example
         run: cp .env.example .env
 
-      - name: Create secret files from examples
-        run: |
-          cp secrets/pg-password.txt.example secrets/pg-password.txt
-          cp secrets/vpn-username.txt.example secrets/vpn-username.txt
-          cp secrets/vpn-password.txt.example secrets/vpn-password.txt
+      - name: Populate secrets via setup-secrets.sh
+        run: ./setup-secrets.sh
 
-      - name: Validate docker-compose.yml
+      - name: Validate docker-compose.yml (vpn profile)
+        env:
+          COMPOSE_PROFILES: vpn
         run: docker compose config --quiet
+
+      - name: Validate docker-compose.yml (novpn profile)
+        env:
+          COMPOSE_PROFILES: novpn
+        run: docker compose config --quiet
+
+      - name: Validate docker-compose.yml (vpn,flaresolverr profile)
+        env:
+          COMPOSE_PROFILES: vpn,flaresolverr
+        run: docker compose config --quiet
+
+      - name: Check init-db.sh is executable and syntactically valid
+        run: |
+          test -x init-db.sh
+          bash -n init-db.sh
+
+      - name: Check setup-secrets.sh is executable and syntactically valid
+        run: |
+          test -x setup-secrets.sh
+          bash -n setup-secrets.sh

@@ -4,7 +4,7 @@
 #
 # Quick start:
 #   1. cp .env.example .env && edit .env
-#   2. cp secrets/*.txt.example secrets/*.txt && edit each file
+#   2. ./setup-secrets.sh   (generates DB passwords + VPN placeholders)
 #   3. docker compose up -d
 #
 # Profiles:
@@ -34,9 +34,12 @@ x-haul-common: &haul-common
   image: ghcr.io/beacon-stack/haul:latest
   container_name: beacon-haul
   restart: unless-stopped
+  secrets:
+    - haul-db-password
   environment:
     HAUL_DATABASE_DRIVER: postgres
-    HAUL_DATABASE_DSN: postgres://haul:haul@postgres:5432/haul_db?sslmode=disable
+    HAUL_DATABASE_DSN: postgres://haul@postgres:5432/haul_db?sslmode=disable
+    HAUL_DATABASE_PASSWORD_FILE: /run/secrets/haul-db-password
     HAUL_PULSE_URL: http://pulse:9696
     HAUL_TORRENT_LISTEN_PORT: ${HAUL_PEER_PORT:-6881}
     HAUL_LOG_LEVEL: ${HAUL_LOG_LEVEL:-info}
@@ -55,6 +58,14 @@ x-haul-common: &haul-common
 secrets:
   pg-password:
     file: ./secrets/pg-password.txt
+  pulse-db-password:
+    file: ./secrets/pulse-db-password.txt
+  pilot-db-password:
+    file: ./secrets/pilot-db-password.txt
+  prism-db-password:
+    file: ./secrets/prism-db-password.txt
+  haul-db-password:
+    file: ./secrets/haul-db-password.txt
   vpn-username:
     file: ./secrets/vpn-username.txt
   vpn-password:
@@ -75,8 +86,9 @@ services:
   # --------------------------------------------------------------------------
   # PostgreSQL — shared database server
   #
-  # Each Beacon app gets its own database and user, created by init-db.sql
-  # on first run. Data is persisted in the 'pgdata' named volume.
+  # Each Beacon app gets its own database and user, created by init-db.sh
+  # on first run from per-app password files in secrets/. Data is persisted
+  # in the 'pgdata' named volume.
   #
   # Not published to the host by default — apps reach it over the internal
   # 'beacon-net' bridge. Uncomment the 'ports:' block below to expose it.
@@ -87,12 +99,16 @@ services:
     restart: unless-stopped
     secrets:
       - pg-password
+      - pulse-db-password
+      - pilot-db-password
+      - prism-db-password
+      - haul-db-password
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/pg-password
       TZ: ${TZ:-UTC}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     networks:
       - beacon-net
     # ports:
@@ -122,9 +138,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    secrets:
+      - pulse-db-password
     environment:
       PULSE_DATABASE_DRIVER: postgres
-      PULSE_DATABASE_DSN: postgres://pulse:pulse@postgres:5432/pulse_db?sslmode=disable
+      PULSE_DATABASE_DSN: postgres://pulse@postgres:5432/pulse_db?sslmode=disable
+      PULSE_DATABASE_PASSWORD_FILE: /run/secrets/pulse-db-password
       PULSE_LOG_LEVEL: ${PULSE_LOG_LEVEL:-info}
       PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-}
       TZ: ${TZ:-UTC}
@@ -161,9 +180,12 @@ services:
         condition: service_healthy
       pulse:
         condition: service_healthy
+    secrets:
+      - pilot-db-password
     environment:
       PILOT_DATABASE_DRIVER: postgres
-      PILOT_DATABASE_DSN: postgres://pilot:pilot@postgres:5432/pilot_db?sslmode=disable
+      PILOT_DATABASE_DSN: postgres://pilot@postgres:5432/pilot_db?sslmode=disable
+      PILOT_DATABASE_PASSWORD_FILE: /run/secrets/pilot-db-password
       PILOT_PULSE_URL: http://pulse:9696
       PILOT_LOG_LEVEL: ${PILOT_LOG_LEVEL:-info}
       TZ: ${TZ:-UTC}
@@ -203,9 +225,12 @@ services:
         condition: service_healthy
       pulse:
         condition: service_healthy
+    secrets:
+      - prism-db-password
     environment:
       PRISM_DATABASE_DRIVER: postgres
-      PRISM_DATABASE_DSN: postgres://prism:prism@postgres:5432/prism_db?sslmode=disable
+      PRISM_DATABASE_DSN: postgres://prism@postgres:5432/prism_db?sslmode=disable
+      PRISM_DATABASE_PASSWORD_FILE: /run/secrets/prism-db-password
       PRISM_PULSE_URL: http://pulse:9696
       PRISM_LOG_LEVEL: ${PRISM_LOG_LEVEL:-info}
       TZ: ${TZ:-UTC}
