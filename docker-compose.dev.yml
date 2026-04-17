@@ -1,0 +1,50 @@
+# ============================================================================
+# Beacon Stack — development override
+#
+# Swaps published ghcr.io images for local builds from the sibling service
+# repos under dev/beacon/. Load it alongside docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Or set COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml in .env and
+# plain `docker compose up -d` will apply both files automatically. See
+# .env.dev.example for a ready-made starting point.
+#
+# The 'image:' lines keep the same ghcr.io tags so you can rebuild with
+# `docker compose build`, reuse the last build with `docker compose up`,
+# or fall back to `docker compose pull && docker compose up` without the
+# override to run the published images verbatim.
+# ============================================================================
+
+services:
+  pulse:
+    build:
+      context: ../pulse
+      dockerfile: Dockerfile
+    image: ghcr.io/beacon-stack/pulse:latest
+
+  pilot:
+    build:
+      context: ..
+      dockerfile: pilot/docker/Dockerfile.beacon
+    image: ghcr.io/beacon-stack/pilot:latest
+
+  prism:
+    build:
+      context: ..
+      dockerfile: prism/docker/Dockerfile.beacon
+    image: ghcr.io/beacon-stack/prism:latest
+
+  # Both haul variants (vpn-tunneled and novpn-direct) inherit image
+  # from the x-haul-common anchor in the base file; override both here.
+  haul:
+    build:
+      context: ..
+      dockerfile: haul/docker/Dockerfile
+    image: ghcr.io/beacon-stack/haul:latest
+
+  haul-direct:
+    build:
+      context: ..
+      dockerfile: haul/docker/Dockerfile
+    image: ghcr.io/beacon-stack/haul:latest
