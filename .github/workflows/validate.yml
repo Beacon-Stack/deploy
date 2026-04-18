@@ -12,33 +12,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create .env from example
-        run: cp .env.example .env
-
-      - name: Populate secrets via setup-secrets.sh
-        run: ./setup-secrets.sh
-
-      - name: Validate docker-compose.yml (vpn profile)
-        env:
-          COMPOSE_PROFILES: vpn
+      - name: Validate base docker-compose.yml (no .env needed)
         run: docker compose config --quiet
 
-      - name: Validate docker-compose.yml (novpn profile)
+      - name: Validate with flaresolverr profile
         env:
-          COMPOSE_PROFILES: novpn
+          COMPOSE_PROFILES: flaresolverr
         run: docker compose config --quiet
 
-      - name: Validate docker-compose.yml (vpn,flaresolverr profile)
+      - name: Validate with VPN override
         env:
-          COMPOSE_PROFILES: vpn,flaresolverr
-        run: docker compose config --quiet
+          VPN_USERNAME: ci
+          VPN_PASSWORD: ci
+        run: docker compose -f docker-compose.yml -f docker-compose.vpn.yml config --quiet
+
+      - name: Validate with VPN override + flaresolverr profile
+        env:
+          COMPOSE_PROFILES: flaresolverr
+          VPN_USERNAME: ci
+          VPN_PASSWORD: ci
+        run: docker compose -f docker-compose.yml -f docker-compose.vpn.yml config --quiet
 
       - name: Check init-db.sh is executable and syntactically valid
         run: |
           test -x init-db.sh
           bash -n init-db.sh
 
-      - name: Check setup-secrets.sh is executable and syntactically valid
+      - name: Check init-secrets.sh is executable and syntactically valid
         run: |
-          test -x setup-secrets.sh
-          bash -n setup-secrets.sh
+          test -x init-secrets.sh
+          sh -n init-secrets.sh

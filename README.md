@@ -1,12 +1,12 @@
 # Beacon Stack — Deploy
 
-Docker Compose deployment for the full Beacon media management stack. Clone, configure, run one command.
+Docker Compose deployment for the full Beacon media management stack. Clone the repo, run one command, done.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker required](https://img.shields.io/badge/Docker-24%2B-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/get-docker/)
 [![beaconstack.io](https://img.shields.io/badge/beaconstack.io-website-4f46e5)](https://beaconstack.io)
 
-[Quick start](#quick-start) · [Services](#services) · [Configuration](#configuration) · [VPN](#vpn-configuration) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Services](#services) · [Enabling VPN](#enabling-vpn) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -19,7 +19,8 @@ Docker Compose deployment for the full Beacon media management stack. Clone, con
 | **Pilot** | TV series manager — monitors episodes, scores releases, and kicks off grabs |
 | **Prism** | Movie collection manager — edition-aware release scoring, Radarr v3 API compatible |
 | **Haul** | BitTorrent client with stall detection and a VPN-aware dashboard |
-| **Gluetun** | VPN tunnel — wraps Haul's network traffic, supports 30+ providers |
+| _Gluetun_ | Optional — VPN tunnel for Haul. See [Enabling VPN](#enabling-vpn). |
+| _FlareSolverr_ | Optional — Cloudflare challenge solver. See [FlareSolverr](#flaresolverr). |
 
 ### Data flow
 
@@ -32,62 +33,42 @@ graph TD
 
     PILOT["Pilot<br/>:8383<br/>TV series"] -->|registers| PULSE
     PRISM["Prism<br/>:8282<br/>movies"] -->|registers| PULSE
+    HAUL["Haul<br/>:8484<br/>BitTorrent"] -->|registers| PULSE
 
     PILOT -->|grab torrent| HAUL
     PRISM -->|grab torrent| HAUL
-
-    subgraph VPN tunnel [VPN tunnel — Gluetun]
-        HAUL["Haul<br/>:8484<br/>BitTorrent"]
-    end
-    HAUL -->|registers| PULSE
 ```
 
-Pulse is the hub. Pilot, Prism, and Haul all register with it on startup and pull shared indexers and quality profiles. When Pilot or Prism grabs a release, the torrent goes to Haul, which runs inside the Gluetun VPN tunnel by default.
+Pulse is the hub. Pilot, Prism, and Haul all register with it on startup and pull shared indexers and quality profiles. When Pilot or Prism grabs a release, the torrent goes to Haul.
 
 ---
 
 ## Quick start
 
-**Prerequisites:** Docker Engine 24+ and Docker Compose v2.20+, a VPN subscription ([or disable it](#disabling-vpn)), 2 GB available RAM.
-
-**1. Clone this repo**
+**Prerequisites:** Docker Engine 24+ and Docker Compose v2.20+, 2 GB available RAM.
 
 ```bash
 git clone https://github.com/beacon-stack/deploy.git
 cd deploy
-```
-
-**2. Copy and edit the environment file**
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and set your VPN provider, server region, and media paths. The file has comments on every variable.
-
-**3. Generate database passwords and VPN credential placeholders**
-
-```bash
-./setup-secrets.sh
-```
-
-The script writes strong random passwords to `secrets/pg-password.txt` and the four per-app files (`secrets/{pulse,pilot,prism,haul}-db-password.txt`), and places editable placeholders for `secrets/vpn-username.txt` and `secrets/vpn-password.txt`. Running it twice never overwrites an existing file.
-
-If you're using the vpn profile, open the two VPN credential files and replace the placeholders with your provider's OpenVPN username and password. No trailing newlines.
-
-**4. Start the stack**
-
-```bash
 docker compose up -d
 ```
 
-**5. Verify everything is healthy**
+That's it. On first start, an `init-secrets` sidecar generates random database passwords into a dedicated Docker volume, Postgres initializes with a user+db per app, and the four Beacon apps start up and register with Pulse. No pre-setup scripts to run, no `.env` to edit for defaults.
+
+**Verify:**
 
 ```bash
 docker compose ps
 ```
 
-What to expect: containers will start in dependency order. The VPN tunnel typically takes 30–60 seconds to establish before Haul comes up. Health checks run every 30 seconds. Once all services show `healthy`, the stack is ready.
+Everything should show `healthy`:
+
+- Pulse → [http://localhost:9696](http://localhost:9696)
+- Pilot → [http://localhost:8383](http://localhost:8383)
+- Prism → [http://localhost:8282](http://localhost:8282)
+- Haul → [http://localhost:8484](http://localhost:8484)
+
+Each app generates an API key on first run; find it in Settings.
 
 ---
 
@@ -100,26 +81,58 @@ What to expect: containers will start in dependency order. The VPN tunnel typica
 | Prism | Movie collection management | 8282 | [localhost:8282](http://localhost:8282) |
 | Haul | BitTorrent client | 8484 | [localhost:8484](http://localhost:8484) |
 
-Each app generates an API key on first run. Find it in the app's Settings page.
-
 ---
 
 ## Connecting the apps
 
-After first startup, two things need to be wired up manually:
+After the stack is up, two things to wire manually through the UIs:
 
 **1. Add Haul as a download client in Pilot and Prism.**
 
-In each app's Settings, add a download client with the URL that matches your profile, plus the API key from Haul's Settings page:
-
-| Profile | Download-client URL |
-|---|---|
-| `vpn` (default) | `http://vpn:8484` — Haul shares the Gluetun network namespace, so it's reachable at the `vpn` hostname. |
-| `novpn` | `http://haul-direct:8484` — Haul is attached to the bridge directly. |
+In each app's Settings, add a download client with URL `http://haul:8484` and the API key from Haul's Settings page. (If you've enabled the VPN override, use `http://vpn:8484` instead — see [Enabling VPN](#enabling-vpn).)
 
 **2. Indexers and quality profiles flow automatically through Pulse.**
 
-If Pulse is running, Pilot and Prism registered with it on startup. Add your indexers in Pulse's web UI and they are available to every subscribed service immediately.
+Pilot, Prism, and Haul register with Pulse on startup. Add indexers in Pulse's web UI and they're available to every registered service immediately.
+
+---
+
+## Enabling VPN
+
+VPN is off by default. To route Haul's torrent traffic through [Gluetun](https://github.com/qdm12/gluetun):
+
+**1. Set VPN credentials in `.env`:**
+
+```env
+VPN_USERNAME=your-vpn-username
+VPN_PASSWORD=your-vpn-password
+COMPOSE_FILE=docker-compose.yml:docker-compose.vpn.yml
+```
+
+**2. Apply:**
+
+```bash
+docker compose up -d
+```
+
+(The `COMPOSE_FILE` line makes plain `docker compose` pick up the VPN override automatically. Without it, run with explicit `-f` flags every time: `docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d`.)
+
+### Switching providers
+
+Gluetun supports [30+ VPN providers](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers). The defaults below work for PIA; override any of them in `.env`:
+
+```env
+VPN_SERVICE_PROVIDER=private internet access   # or mullvad, nordvpn, surfshark, protonvpn
+VPN_TYPE=openvpn                                # or wireguard
+VPN_SERVER_REGIONS=Netherlands
+VPN_PORT_FORWARDING=on                          # PIA and ProtonVPN support this
+```
+
+For WireGuard, set `VPN_TYPE=wireguard` and uncomment the `WIREGUARD_*` lines in `docker-compose.vpn.yml`.
+
+### Disabling VPN
+
+Remove the `COMPOSE_FILE` line from `.env` (or drop the `-f docker-compose.vpn.yml` from your command). Haul reattaches directly to the bridge network on the next `docker compose up -d`.
 
 ---
 
@@ -127,40 +140,41 @@ If Pulse is running, Pilot and Prism registered with it on startup. Add your ind
 
 ### Environment variables
 
-All configurable values live in `.env`. The file is organized by service with comments explaining each variable. See `.env.example` for the full reference.
-
-### Docker secrets
-
-Passwords are stored in `secrets/*.txt` files, not in `.env`. Docker mounts these files into containers at `/run/secrets/` — they never appear in `docker inspect` output or the process environment.
-
-| File | What goes in it |
-|---|---|
-| `secrets/pg-password.txt` | Postgres superuser password |
-| `secrets/pulse-db-password.txt` | Password for the `pulse` database user |
-| `secrets/pilot-db-password.txt` | Password for the `pilot` database user |
-| `secrets/prism-db-password.txt` | Password for the `prism` database user |
-| `secrets/haul-db-password.txt` | Password for the `haul` database user |
-| `secrets/vpn-username.txt` | VPN username (OpenVPN) |
-| `secrets/vpn-password.txt` | VPN password (OpenVPN) |
-
-Each app reads its password from the corresponding file via the `*_DATABASE_PASSWORD_FILE` environment variable — the same convention used by Postgres's own `POSTGRES_PASSWORD_FILE`. Passwords never live inside `docker-compose.yml`.
-
-### Database passwords
-
-Run `./setup-secrets.sh` once and the five database password files get filled with strong random values. The script is idempotent — running it again leaves existing files alone.
-
-If you need to change a password after the first run, Postgres has already baked the old one into the `pgdata` volume. Changing it requires dropping the volume and re-initializing — **all data is lost**:
+The stack ships with defaults that work out of the box. Override them by creating a `.env`:
 
 ```bash
-docker compose down -v   # deletes pgdata — all data is lost
-rm secrets/pulse-db-password.txt   # or whichever password you're rotating
-./setup-secrets.sh
+cp .env.example .env
+# edit .env
+```
+
+Common overrides: port numbers, media paths, FlareSolverr URL, log levels. See `.env.example` for the full list with defaults.
+
+### Secrets handling
+
+DB passwords are generated on first run by the `init-secrets` sidecar and stored in a Docker-managed volume (`beacon-secrets`). They never appear in `.env`, `docker-compose.yml`, or `docker inspect` output.
+
+| What | Where |
+|---|---|
+| Per-app DB passwords | `beacon-secrets` volume, mounted read-only at `/run/secrets/<app>.txt` |
+| Postgres superuser password | Same — `/run/secrets/pg.txt` |
+| VPN credentials | `VPN_USERNAME` / `VPN_PASSWORD` env vars (only needed when VPN override is active) |
+
+To inspect a password (admin only):
+
+```bash
+docker run --rm -v beacon-secrets:/s alpine cat /s/pulse.txt
+```
+
+To rotate passwords: stop the stack, drop both volumes, start again. **All DB data is lost** — Postgres bakes the old password hashes into `pgdata`.
+
+```bash
+docker compose down -v
 docker compose up -d
 ```
 
 ### Media paths
 
-The default paths are relative to the deploy directory (`./data/downloads`, `./data/tv`, `./data/movies`), which makes the stack self-contained out of the box. Override them in `.env` for NAS mounts or existing media directories:
+Default paths are relative to the deploy directory (`./data/downloads`, `./data/tv`, `./data/movies`). Override for NAS mounts or existing libraries:
 
 ```env
 DOWNLOADS_PATH=/mnt/nas/downloads
@@ -168,137 +182,67 @@ TV_PATH=/mnt/nas/media/tv
 MOVIES_PATH=/mnt/nas/media/movies
 ```
 
-Pilot, Prism, and Haul all mount `DOWNLOADS_PATH` so they can see completed downloads and import or hardlink them into the media directories.
-
----
-
-## VPN configuration
-
-The stack uses [Gluetun](https://github.com/qdm12/gluetun), which supports 30+ VPN providers. The default configuration is PIA (Private Internet Access) over OpenVPN.
-
-### Switching providers
-
-Set `VPN_SERVICE_PROVIDER` and the required auth variables in `.env`. Each provider has different requirements — see the [Gluetun wiki](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers) for your provider's page.
-
-**PIA** (default):
-```env
-VPN_SERVICE_PROVIDER=private internet access
-VPN_TYPE=openvpn
-VPN_SERVER_REGIONS=Netherlands
-VPN_PORT_FORWARDING=on
-```
-
-**Mullvad** (WireGuard):
-```env
-VPN_SERVICE_PROVIDER=mullvad
-VPN_TYPE=wireguard
-WIREGUARD_PRIVATE_KEY=your-key-here
-WIREGUARD_ADDRESSES=10.x.x.x/32
-VPN_SERVER_REGIONS=Netherlands
-```
-
-**NordVPN**:
-```env
-VPN_SERVICE_PROVIDER=nordvpn
-VPN_TYPE=openvpn
-VPN_SERVER_REGIONS=Netherlands
-```
-
-**ProtonVPN**:
-```env
-VPN_SERVICE_PROVIDER=protonvpn
-VPN_TYPE=openvpn
-VPN_SERVER_REGIONS=Netherlands
-VPN_PORT_FORWARDING=on
-```
-
-**Surfshark**:
-```env
-VPN_SERVICE_PROVIDER=surfshark
-VPN_TYPE=openvpn
-VPN_SERVER_REGIONS=Netherlands
-```
-
-For WireGuard providers, uncomment the `WIREGUARD_*` lines in `docker-compose.yml` under the vpn service and set them in `.env`. The OpenVPN secret files can be left with placeholder values — Gluetun ignores them when using WireGuard.
-
-### Port forwarding
-
-VPN port forwarding allows incoming torrent connections, which improves download speeds and peer availability. PIA and ProtonVPN support it natively through Gluetun. Set `VPN_PORT_FORWARDING=on` in `.env`.
-
-### Disabling VPN
-
-Change the active profile in `.env`:
-
-```env
-COMPOSE_PROFILES=novpn
-```
-
-Then `docker compose up -d`. The `vpn` service stops; a `haul-direct` service starts in its place with Haul's ports published directly on the host. Entries under `# --- VPN (Gluetun) ---` in `.env` and the `secrets/vpn-*.txt` files can be left as-is — they aren't read while `novpn` is active.
-
-Switching back is symmetric: `COMPOSE_PROFILES=vpn` and `docker compose up -d`.
+Pilot, Prism, and Haul all see `DOWNLOADS_PATH` so they can import or hardlink completed downloads.
 
 ---
 
 ## FlareSolverr
 
-[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a Cloudflare challenge solver. It's useful if your indexers are behind Cloudflare's bot protection. Most users don't need it.
+[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a Cloudflare challenge solver for indexers behind Cloudflare bot protection. Most users don't need it.
 
-To enable it alongside the main stack, add `flaresolverr` to the profile list in `.env`:
+Enable it with `COMPOSE_PROFILES=flaresolverr` in `.env`, then:
 
-```env
-COMPOSE_PROFILES=vpn,flaresolverr
+```bash
+docker compose up -d
 ```
 
-Then `docker compose up -d` and configure the URL in Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
+In Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
 
 ---
 
 ## Updating
 
 ```bash
-docker compose pull        # pull latest images for all services
-docker compose up -d       # recreate containers with new images
+docker compose pull
+docker compose up -d
 ```
 
-Each app handles its own database migrations on startup — no manual schema changes needed.
+Each app runs its own database migrations on startup.
 
 ---
 
 ## Troubleshooting
 
-**VPN won't connect**
-- Check your credentials in `secrets/vpn-username.txt` and `secrets/vpn-password.txt` — no trailing newlines
-- Verify the provider name is spelled correctly in `.env` (must match Gluetun's expected value exactly)
-- Check Gluetun logs: `docker compose logs vpn`
+**A service never goes healthy**
+- `docker compose logs <service>` names the problem. Most common: Postgres still initializing (wait 30s), or Pulse can't see itself (restart; Goose migrations are idempotent).
 
-**Haul can't reach Postgres or Pulse**
-- Haul shares the vpn container's network namespace. The vpn container is attached to the internal `beacon-net` bridge, and `FIREWALL_OUTBOUND_SUBNETS=172.28.0.0/16` on Gluetun allows outbound traffic to that subnet so Haul can reach `postgres` and `pulse` by service name without going through the tunnel.
-- If you've changed the `beacon-net` subnet in `docker-compose.yml`, update `FIREWALL_OUTBOUND_SUBNETS` to match.
-- Check Gluetun logs for firewall denials: `docker compose logs vpn | grep -i firewall`
+**VPN won't connect** (when VPN override active)
+- Check `VPN_USERNAME` and `VPN_PASSWORD` in `.env`.
+- Confirm the provider name matches Gluetun's expected value — see the [Gluetun wiki](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers).
+- `docker compose logs vpn`
 
-**Database initialization failed**
-- If the `pgdata` volume already exists from a previous run with different passwords, drop it: `docker compose down -v && docker compose up -d`
-- Check Postgres logs: `docker compose logs postgres`
+**Haul can't reach Postgres or Pulse** (VPN override active)
+- Haul shares Gluetun's network namespace. Gluetun is attached to `beacon-net` and its firewall allow-lists the bridge subnet via `FIREWALL_OUTBOUND_SUBNETS=172.28.0.0/16`.
+- If you changed the `beacon-net` subnet, update `FIREWALL_OUTBOUND_SUBNETS` in `docker-compose.vpn.yml` to match.
 
 **Port conflicts**
-- If another service already uses port 9696, 8383, 8282, or 8484, change the corresponding `*_PORT` variable in `.env`. Postgres is not published to the host by default; enabling the optional `ports:` block in `docker-compose.yml` brings `POSTGRES_PORT` into play.
+- If another host service uses 9696, 8383, 8282, or 8484, change the corresponding `*_PORT` variable in `.env`. Postgres is not published by default; uncomment the `ports:` block in `docker-compose.yml` to expose it.
 
-**Permission errors on bind-mounted volumes**
-- The Beacon app containers run as non-root users (UID 1000). Ensure the host directories in `DOWNLOADS_PATH`, `TV_PATH`, and `MOVIES_PATH` are writable by UID 1000, or adjust ownership: `sudo chown -R 1000:1000 ./data/`
+**Starting over**
+- `docker compose down -v` drops pgdata and beacon-secrets. Next `docker compose up -d` is a full fresh start. App configs under `${PULSE_CONFIG_PATH}` etc. are not in Docker volumes — delete them manually if you also want fresh API keys.
 
 ---
 
 ## Development
 
-To run the stack against locally-built images from sibling service repos (`pulse/`, `pilot/`, `prism/`, `haul/` under `dev/beacon/`), use the dev override:
+Clone this repo alongside `pulse/`, `pilot/`, `prism/`, `haul/` (i.e., all under one parent directory). The dev override builds each service from local source:
 
 ```bash
 cp .env.dev.example .env
-./setup-secrets.sh
 docker compose up -d --build
 ```
 
-`docker-compose.dev.yml` adds `build: ../<repo>` to each service; `.env.dev.example` points config and media paths at `~/.config/*` and `/opt/media/*`. The `COMPOSE_FILE` line in `.env.dev.example` auto-applies the override on every `docker compose` invocation.
+`docker-compose.dev.yml` adds `build: ../<repo>` to each service; `.env.dev.example` points config paths at `~/.config/beacon/*` and media at `/opt/media/*` so rebuilds don't wipe your UI settings.
 
 Rebuild a single service after local changes:
 
@@ -306,11 +250,13 @@ Rebuild a single service after local changes:
 docker compose build pilot && docker compose up -d pilot
 ```
 
-To fall back to the published images, swap `.env` back to `.env.example`.
+To fall back to the published images, swap `.env` back to `.env.example` (or just delete `.env`).
+
+---
 
 ## Privacy
 
-No telemetry, no analytics, no crash reporting, no update checks. Every Beacon app makes outbound connections only to services you explicitly configure: TMDB for metadata, your indexers, your download clients, your media servers, and your VPN tunnel. Credentials stay in your local database and Docker secrets.
+No telemetry, no analytics, no crash reporting, no update checks. Every Beacon app makes outbound connections only to services you explicitly configure: TMDB for metadata, your indexers, your download clients, your media servers, and (optionally) your VPN tunnel. Credentials stay in your local database and Docker volumes.
 
 ## License
 

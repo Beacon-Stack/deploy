@@ -35,17 +35,9 @@ services:
       dockerfile: prism/docker/Dockerfile.beacon
     image: ghcr.io/beacon-stack/prism:latest
 
-  # Both haul variants (vpn-tunneled and novpn-direct) inherit image
-  # from the x-haul-common anchor in the base file; override both here.
   # Haul's Dockerfile expects the haul repo root as build context
   # (unlike pilot/prism/.beacon Dockerfiles which expect the beacon/ root).
   haul:
-    build:
-      context: ../haul
-      dockerfile: docker/Dockerfile
-    image: ghcr.io/beacon-stack/haul:latest
-
-  haul-direct:
     build:
       context: ../haul
       dockerfile: docker/Dockerfile
