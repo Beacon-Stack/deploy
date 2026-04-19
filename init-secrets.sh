@@ -19,9 +19,15 @@ for name in pg pulse pilot prism haul; do
     target="/secrets/${name}.txt"
     if [ ! -s "${target}" ]; then
         head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "${target}"
-        chmod 0600 "${target}"
         echo "generated ${target}"
     else
         echo "skip ${target} (already exists)"
     fi
+    # World-readable so the beacon apps (which run as non-root) can read
+    # their password file. init-secrets runs as root and writes root-owned
+    # files; without this chmod they'd be readable only by root inside the
+    # container, and the apps would fail with "permission denied". The
+    # volume is Docker-managed — only root on the host can access it —
+    # so world-readable INSIDE containers is the right threat model.
+    chmod 0444 "${target}"
 done
