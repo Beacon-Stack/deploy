@@ -15,7 +15,7 @@
 
 set -eu
 
-for name in pg pulse pilot prism haul; do
+for name in pg pulse pilot prism haul pulse-api-key; do
     target="/secrets/${name}.txt"
     if [ ! -s "${target}" ]; then
         head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "${target}"
