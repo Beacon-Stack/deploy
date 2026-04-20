@@ -121,6 +121,10 @@ services:
       PULSE_DATABASE_DSN: postgres://pulse@postgres:5432/pulse_db?sslmode=disable
       PULSE_DATABASE_PASSWORD_FILE: /run/secrets/pulse.txt
       PULSE_AUTH_API_KEY_FILE: /run/secrets/pulse-api-key.txt
+      # Baked into the torznab proxy URLs Pulse hands out to Pilot/Prism.
+      # Must be reachable from INSIDE those containers, not the host —
+      # hence the service name rather than localhost.
+      PULSE_SERVER_EXTERNAL_URL: http://pulse:9696
       PULSE_LOG_LEVEL: ${PULSE_LOG_LEVEL:-info}
       PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-}
       TZ: ${TZ:-UTC}
