@@ -165,12 +165,9 @@ services:
       PILOT_DATABASE_PASSWORD_FILE: /run/secrets/pilot.txt
       PILOT_PULSE_URL: http://pulse:9696
       PILOT_PULSE_API_KEY_FILE: /run/secrets/pulse-api-key.txt
-      # Third-party metadata provider keys. Baked in at image build
-      # time by CI via ldflags (DefaultTMDBKey / DefaultTraktClientID)
-      # — these env vars are a runtime override for users on locally-
-      # built images or anyone who wants to rotate.
-      PILOT_TVDB_API_KEY: ${PILOT_TVDB_API_KEY:-}
-      PILOT_TRAKT_CLIENT_ID: ${PILOT_TRAKT_CLIENT_ID:-}
+      # Metadata provider keys (TVDB, Trakt) are baked into the image at
+      # build time and rotated via Pilot's Settings → Providers UI. No
+      # .env exposure.
       PILOT_LOG_LEVEL: ${PILOT_LOG_LEVEL:-info}
       TZ: ${TZ:-UTC}
     volumes:
