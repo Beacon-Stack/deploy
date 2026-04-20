@@ -23,16 +23,28 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/beacon-stack/pulse:latest
 
+  # Pilot and Prism bake third-party metadata keys into the binary via
+  # ldflags. CI reads these from repo secrets; for local builds, set
+  # PILOT_TMDB_API_KEY / PILOT_TRAKT_CLIENT_ID (same for PRISM_*) in .env
+  # or your shell — otherwise the built image ships with empty defaults
+  # and the app will 503 on series/movie lookup until a runtime override
+  # is supplied.
   pilot:
     build:
       context: ..
       dockerfile: pilot/docker/Dockerfile.beacon
+      args:
+        TMDB_API_KEY: ${PILOT_TMDB_API_KEY:-}
+        TRAKT_CLIENT_ID: ${PILOT_TRAKT_CLIENT_ID:-}
     image: ghcr.io/beacon-stack/pilot:latest
 
   prism:
     build:
       context: ..
       dockerfile: prism/docker/Dockerfile.beacon
+      args:
+        TMDB_API_KEY: ${PRISM_TMDB_API_KEY:-}
+        TRAKT_CLIENT_ID: ${PRISM_TRAKT_CLIENT_ID:-}
     image: ghcr.io/beacon-stack/prism:latest
 
   # Haul's Dockerfile expects the haul repo root as build context
