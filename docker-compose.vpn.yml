@@ -65,12 +65,10 @@ services:
       - "${HAUL_PEER_PORT:-6881}:6881/udp"
     volumes:
       - ${GLUETUN_CONFIG_PATH:-./config/gluetun}:/gluetun
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+    # No custom healthcheck — Gluetun ships with its own that queries the
+    # internal control server for tunnel status. Our previous override
+    # hit `/`, which returns 404, making Docker mark the container
+    # unhealthy even when the VPN was up.
     logging:
       driver: json-file
       options:
