@@ -1,30 +1,30 @@
 # ============================================================================
-# Beacon Stack — All-in-one media management
+# Beacon Stack — self-hosted media management
 # https://beaconstack.io
 #
 # Quick start:
-#   git clone https://github.com/beacon-stack/deploy.git
-#   cd deploy
-#   docker compose up -d
+#   1. Edit the /path/to/... lines below to point at your storage.
+#   2. docker compose up -d
 #
-# That's it. On first run the init-secrets sidecar generates random
-# database passwords into a dedicated Docker volume; everything else wires
-# itself up around that.
+# That's it. A one-shot sidecar generates random database passwords on
+# first run and stores them in a Docker-managed volume. Web UIs:
+#   - Pulse:  http://localhost:9696
+#   - Pilot:  http://localhost:8383  (TV)
+#   - Prism:  http://localhost:8282  (Movies)
+#   - Haul:   http://localhost:8484  (Torrent client)
+#
+# IMPORTANT: your TV/Movies library and downloads directory must sit on
+# the SAME filesystem. Imports use hardlinks + atomic moves; if the two
+# paths are on different filesystems, the stack falls back to copies
+# (slow, wastes disk). Easiest setup: put everything under one root
+# (e.g. /opt/media/tv, /opt/media/movies, /opt/media/downloads).
 #
 # Optional:
-#   - Enable the Gluetun VPN tunnel:
-#       docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
-#     (see README "Enabling VPN")
-#   - Enable FlareSolverr for Cloudflare-protected indexers:
+#   - VPN tunnel for Haul (see docker-compose.vpn.yml)
+#   - FlareSolverr for Cloudflare-protected indexers:
 #       COMPOSE_PROFILES=flaresolverr docker compose up -d
-#
-# Internal network:
-#   All services share the 'beacon-net' bridge (172.28.0.0/16). Postgres is
-#   not published to the host by default — only the app web UIs are.
 # ============================================================================
 
-# Log rotation defaults — applied to every service via YAML anchor.
-# Caps each service's logs at 30 MB total (10 MB × 3 files).
 x-logging: &default-logging
   driver: json-file
   options:
@@ -44,34 +44,28 @@ volumes:
 
 services:
 
-  # --------------------------------------------------------------------------
-  # init-secrets — one-shot sidecar that generates random DB passwords
-  #
-  # Runs before Postgres and any Beacon app. Writes one random password per
-  # service into the beacon-secrets named volume, which the other containers
-  # then mount read-only at /run/secrets. Idempotent — re-runs see existing
-  # files and skip.
-  # --------------------------------------------------------------------------
+  # One-shot sidecar — generates random DB passwords on first run.
+  # Idempotent: skips files that already exist on subsequent runs.
   init-secrets:
     image: alpine:3.21
     container_name: beacon-init-secrets
     restart: "no"
     volumes:
       - beacon-secrets:/secrets
-      - ./init-secrets.sh:/init-secrets.sh:ro
-    entrypoint: ["sh", "/init-secrets.sh"]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        for name in pg pulse pilot prism haul pulse-api-key; do
+          f="/secrets/$${name}.txt"
+          if [ ! -s "$$f" ]; then
+            head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "$$f"
+            echo "generated $$f"
+          fi
+          chmod 0444 "$$f"
+        done
     logging: *default-logging
 
-  # --------------------------------------------------------------------------
-  # PostgreSQL — shared database server
-  #
-  # init-db.sh runs on first startup (empty pgdata volume) and creates a
-  # dedicated user + database per Beacon app, reading each password from
-  # the shared beacon-secrets volume.
-  #
-  # Not published to the host by default; uncomment the 'ports:' block
-  # below to expose it for psql/backups.
-  # --------------------------------------------------------------------------
   postgres:
     image: postgres:17-alpine
     container_name: beacon-postgres
@@ -81,15 +75,12 @@ services:
         condition: service_completed_successfully
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/pg.txt
-      TZ: ${TZ:-UTC}
+      TZ: UTC
     volumes:
       - pgdata:/var/lib/postgresql/data
       - beacon-secrets:/run/secrets:ro
-      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     networks:
       - beacon-net
-    # ports:
-    #   - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -98,43 +89,59 @@ services:
       start_period: 30s
     logging: *default-logging
 
-  # --------------------------------------------------------------------------
-  # Pulse — control plane
-  #
-  # Service registry, shared indexer management, quality profiles, and
-  # cross-service settings. Pilot, Prism, and Haul register with Pulse on
-  # startup and pull shared configuration from it.
-  #
-  # Web UI: http://localhost:9696
-  # --------------------------------------------------------------------------
+  # One-shot sidecar — creates per-service DB users + databases after
+  # Postgres is healthy. Idempotent; does nothing on subsequent runs.
+  init-databases:
+    image: postgres:17-alpine
+    container_name: beacon-init-databases
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - beacon-secrets:/run/secrets:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        export PGPASSWORD="$$(cat /run/secrets/pg.txt)"
+        for name in pulse pilot prism haul; do
+          pw="$$(cat /run/secrets/$${name}.txt)"
+          exists=$$(psql -h postgres -U postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$$name'")
+          if [ "$$exists" != "1" ]; then
+            psql -h postgres -U postgres -v pw="$$pw" -c "CREATE USER $$name WITH PASSWORD :'pw'"
+          fi
+          dbexists=$$(psql -h postgres -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$${name}_db'")
+          if [ "$$dbexists" != "1" ]; then
+            psql -h postgres -U postgres -c "CREATE DATABASE $${name}_db OWNER $$name"
+          fi
+        done
+    networks:
+      - beacon-net
+    logging: *default-logging
+
   pulse:
     image: ghcr.io/beacon-stack/pulse:latest
     container_name: beacon-pulse
     restart: unless-stopped
     depends_on:
-      init-secrets:
+      init-databases:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
     environment:
       PULSE_DATABASE_DRIVER: postgres
       PULSE_DATABASE_DSN: postgres://pulse@postgres:5432/pulse_db?sslmode=disable
       PULSE_DATABASE_PASSWORD_FILE: /run/secrets/pulse.txt
       PULSE_AUTH_API_KEY_FILE: /run/secrets/pulse-api-key.txt
-      # Baked into the torznab proxy URLs Pulse hands out to Pilot/Prism.
-      # Must be reachable from INSIDE those containers, not the host —
-      # hence the service name rather than localhost.
       PULSE_SERVER_EXTERNAL_URL: http://pulse:9696
-      PULSE_LOG_LEVEL: ${PULSE_LOG_LEVEL:-info}
-      PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-}
-      TZ: ${TZ:-UTC}
+      PULSE_LOG_LEVEL: info
+      TZ: UTC
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - ${PULSE_CONFIG_PATH:-./config/pulse}:/config
+      - /path/to/pulse/config:/config
     networks:
       - beacon-net
     ports:
-      - "${PULSE_PORT:-9696}:9696"
+      - "9696:9696"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9696/health"]
       interval: 15s
@@ -143,20 +150,13 @@ services:
       start_period: 20s
     logging: *default-logging
 
-  # --------------------------------------------------------------------------
-  # Pilot — TV series manager
-  #
-  # Web UI: http://localhost:8383
-  # --------------------------------------------------------------------------
   pilot:
     image: ghcr.io/beacon-stack/pilot:latest
     container_name: beacon-pilot
     restart: unless-stopped
     depends_on:
-      init-secrets:
+      init-databases:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
       pulse:
         condition: service_healthy
     environment:
@@ -165,20 +165,17 @@ services:
       PILOT_DATABASE_PASSWORD_FILE: /run/secrets/pilot.txt
       PILOT_PULSE_URL: http://pulse:9696
       PILOT_PULSE_API_KEY_FILE: /run/secrets/pulse-api-key.txt
-      # Metadata provider keys (TVDB, Trakt) are baked into the image at
-      # build time and rotated via Pilot's Settings → Providers UI. No
-      # .env exposure.
-      PILOT_LOG_LEVEL: ${PILOT_LOG_LEVEL:-info}
-      TZ: ${TZ:-UTC}
+      PILOT_LOG_LEVEL: info
+      TZ: UTC
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - ${PILOT_CONFIG_PATH:-./config/pilot}:/config
-      - ${TV_PATH:-./data/tv}:/tv
-      - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
+      - /path/to/pilot/config:/config
+      - /path/to/tv:/tv                  # optional
+      - /path/to/downloads:/downloads    # optional
     networks:
       - beacon-net
     ports:
-      - "${PILOT_PORT:-8383}:8383"
+      - "8383:8383"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8383/health"]
       interval: 15s
@@ -187,20 +184,13 @@ services:
       start_period: 20s
     logging: *default-logging
 
-  # --------------------------------------------------------------------------
-  # Prism — movie collection manager
-  #
-  # Web UI: http://localhost:8282
-  # --------------------------------------------------------------------------
   prism:
     image: ghcr.io/beacon-stack/prism:latest
     container_name: beacon-prism
     restart: unless-stopped
     depends_on:
-      init-secrets:
+      init-databases:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
       pulse:
         condition: service_healthy
     environment:
@@ -209,17 +199,17 @@ services:
       PRISM_DATABASE_PASSWORD_FILE: /run/secrets/prism.txt
       PRISM_PULSE_URL: http://pulse:9696
       PRISM_PULSE_API_KEY_FILE: /run/secrets/pulse-api-key.txt
-      PRISM_LOG_LEVEL: ${PRISM_LOG_LEVEL:-info}
-      TZ: ${TZ:-UTC}
+      PRISM_LOG_LEVEL: info
+      TZ: UTC
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - ${PRISM_CONFIG_PATH:-./config/prism}:/config
-      - ${MOVIES_PATH:-./data/movies}:/movies
-      - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
+      - /path/to/prism/config:/config
+      - /path/to/movies:/movies          # optional
+      - /path/to/downloads:/downloads    # optional
     networks:
       - beacon-net
     ports:
-      - "${PRISM_PORT:-8282}:8282"
+      - "8282:8282"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8282/health"]
       interval: 15s
@@ -228,44 +218,33 @@ services:
       start_period: 20s
     logging: *default-logging
 
-  # --------------------------------------------------------------------------
-  # Haul — BitTorrent client
-  #
-  # Runs directly on the bridge network. All torrent traffic goes out the
-  # host's default interface. To tunnel Haul through Gluetun, add the VPN
-  # override compose file:
-  #   docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
-  #
-  # Web UI: http://localhost:8484
-  # --------------------------------------------------------------------------
   haul:
     image: ghcr.io/beacon-stack/haul:latest
     container_name: beacon-haul
     restart: unless-stopped
     depends_on:
-      init-secrets:
+      init-databases:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
     environment:
       HAUL_DATABASE_DRIVER: postgres
       HAUL_DATABASE_DSN: postgres://haul@postgres:5432/haul_db?sslmode=disable
       HAUL_DATABASE_PASSWORD_FILE: /run/secrets/haul.txt
       HAUL_PULSE_URL: http://pulse:9696
       HAUL_PULSE_API_KEY_FILE: /run/secrets/pulse-api-key.txt
-      HAUL_TORRENT_LISTEN_PORT: ${HAUL_PEER_PORT:-6881}
-      HAUL_LOG_LEVEL: ${HAUL_LOG_LEVEL:-info}
-      TZ: ${TZ:-UTC}
+      HAUL_TORRENT_LISTEN_PORT: 6881
+      HAUL_TORRENT_DOWNLOAD_DIR: /downloads
+      HAUL_LOG_LEVEL: info
+      TZ: UTC
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - ${HAUL_CONFIG_PATH:-./config/haul}:/config
-      - ${DOWNLOADS_PATH:-./data/downloads}:/downloads
+      - /path/to/haul/config:/config
+      - /path/to/downloads:/downloads
     networks:
       - beacon-net
     ports:
-      - "${HAUL_PORT:-8484}:8484"
-      - "${HAUL_PEER_PORT:-6881}:6881/tcp"
-      - "${HAUL_PEER_PORT:-6881}:6881/udp"
+      - "8484:8484"
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8484/health"]
       interval: 15s
@@ -274,14 +253,6 @@ services:
       start_period: 30s
     logging: *default-logging
 
-  # --------------------------------------------------------------------------
-  # FlareSolverr — Cloudflare challenge solver (optional)
-  #
-  # Only starts when 'flaresolverr' is in COMPOSE_PROFILES:
-  #   COMPOSE_PROFILES=flaresolverr docker compose up -d
-  #
-  # Then set Pulse's FlareSolverr URL to http://flaresolverr:8191 in the UI.
-  # --------------------------------------------------------------------------
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: beacon-flaresolverr
@@ -289,10 +260,10 @@ services:
     profiles:
       - flaresolverr
     environment:
-      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
-      TZ: ${TZ:-UTC}
+      LOG_LEVEL: info
+      TZ: UTC
     networks:
       - beacon-net
     ports:
-      - "${FLARESOLVERR_PORT:-8191}:8191"
+      - "8191:8191"
     logging: *default-logging
