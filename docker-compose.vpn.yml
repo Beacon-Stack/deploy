@@ -1,37 +1,33 @@
 # ============================================================================
 # Beacon Stack — VPN override
 #
-# Adds a Gluetun service (`vpn`) and reroutes Haul's network through it so
-# all torrent traffic exits via the VPN tunnel. Everything else stays on
-# the shared bridge network.
+# Adds a Gluetun service and reroutes Haul through it so all torrent
+# traffic exits via the VPN tunnel. Everything else stays on the shared
+# bridge network.
 #
-# Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
+# Quick start:
+#   1. Create a .env with your VPN credentials (see .env.example).
+#   2. docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
 #
-# Or set COMPOSE_FILE in .env:
+# Or set COMPOSE_FILE in .env so plain `docker compose` picks it up:
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.vpn.yml
 #
-# Requires VPN_USERNAME and VPN_PASSWORD in .env (or the shell env) — the
-# vpn service will refuse to start without them. Other provider-specific
-# settings (VPN_SERVICE_PROVIDER, VPN_SERVER_REGIONS, etc.) fall back to
-# sensible PIA/OpenVPN defaults.
+# Provider config (defaults to PIA / OpenVPN / Netherlands) can be tuned
+# via the environment block below.
 #
-# Requires Docker Compose v2.20+ for the `!reset` tag used below.
+# Requires Docker Compose v2.20+ for the `!reset` tag.
 # ============================================================================
 
 services:
 
-  # --------------------------------------------------------------------------
-  # Gluetun — provider-agnostic VPN tunnel
+  # Gluetun — provider-agnostic VPN tunnel.
+  # https://github.com/qdm12/gluetun (30+ providers).
+  # https://github.com/qdm12/gluetun-wiki (provider-specific knobs).
   #
-  # https://github.com/qdm12/gluetun — supports 30+ providers. See
-  # https://github.com/qdm12/gluetun-wiki for provider-specific config.
-  #
-  # Gluetun is attached to beacon-net and its firewall allow-lists the
-  # bridge subnet via FIREWALL_OUTBOUND_SUBNETS, so Haul (sharing this
-  # namespace) can still reach Postgres and Pulse by service name while
-  # torrent traffic exits through tun0.
-  # --------------------------------------------------------------------------
+  # Attached to beacon-net; its firewall allow-lists the bridge subnet via
+  # FIREWALL_OUTBOUND_SUBNETS so Haul (sharing this namespace) can still
+  # reach Postgres and Pulse by service name while torrent traffic exits
+  # through tun0.
   vpn:
     image: qmcgaw/gluetun:latest
     container_name: beacon-vpn
@@ -41,54 +37,48 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-private internet access}
-      VPN_TYPE: ${VPN_TYPE:-openvpn}
+      VPN_SERVICE_PROVIDER: private internet access
+      VPN_TYPE: openvpn
       OPENVPN_USER: ${VPN_USERNAME:?VPN_USERNAME must be set in .env to use the VPN override}
       OPENVPN_PASSWORD: ${VPN_PASSWORD:?VPN_PASSWORD must be set in .env to use the VPN override}
-      # WireGuard auth — uncomment these and set VPN_TYPE=wireguard in .env
-      # WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:-}
-      # WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:-}
-      SERVER_REGIONS: ${VPN_SERVER_REGIONS:-Netherlands}
-      VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING:-on}
-      VPN_PORT_FORWARDING_PROVIDER: ${VPN_PORT_FORWARDING_PROVIDER:-}
-      FIREWALL_VPN_INPUT_PORTS: ${HAUL_PEER_PORT:-6881}
-      FIREWALL_INPUT_PORTS: ${HAUL_PORT:-8484}
+      # WireGuard auth — uncomment these and change VPN_TYPE above to wireguard
+      # WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
+      # WIREGUARD_ADDRESSES:   ${WIREGUARD_ADDRESSES}
+      SERVER_REGIONS: Netherlands
+      VPN_PORT_FORWARDING: on
+      FIREWALL_VPN_INPUT_PORTS: 6881
+      FIREWALL_INPUT_PORTS: 8484
       FIREWALL_OUTBOUND_SUBNETS: 172.28.0.0/16
-      TZ: ${TZ:-UTC}
+      TZ: UTC
     networks:
       - beacon-net
     ports:
       # Haul shares this container's network namespace; its ports are
       # published here instead of on the haul service.
-      - "${HAUL_PORT:-8484}:8484"
-      - "${HAUL_PEER_PORT:-6881}:6881/tcp"
-      - "${HAUL_PEER_PORT:-6881}:6881/udp"
+      - "8484:8484"
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
     volumes:
-      - ${GLUETUN_CONFIG_PATH:-./config/gluetun}:/gluetun
-    # No custom healthcheck — Gluetun ships with its own that queries the
-    # internal control server for tunnel status. Our previous override
-    # hit `/`, which returns 404, making Docker mark the container
-    # unhealthy even when the VPN was up.
+      - ${GLUETUN_CONFIG_PATH:-/path/to/gluetun/config}:/gluetun
+    # No custom healthcheck — Gluetun's built-in queries its control
+    # server for tunnel status. Our previous override hit `/` and got a
+    # 404, which marked the container unhealthy even when the VPN was up.
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-  # --------------------------------------------------------------------------
-  # Haul — override to tunnel through Gluetun
-  #
-  # !reset clears the base compose's 'ports' and 'networks' keys (required
-  # because network_mode: service:X is mutually exclusive with both).
-  # --------------------------------------------------------------------------
+  # Haul — override to tunnel through Gluetun.
+  # `!reset` clears the base compose's 'ports' and 'networks' keys
+  # (required because network_mode: service:X is mutually exclusive with
+  # both).
   haul:
     network_mode: service:vpn
     ports: !reset []
     networks: !reset []
     depends_on:
-      init-secrets:
+      init-databases:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
       vpn:
         condition: service_healthy

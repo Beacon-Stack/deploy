@@ -13,12 +13,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Validate base docker-compose.yml (no .env needed)
-        run: docker compose config --quiet
+        run: docker compose -f docker-compose.yml config --quiet
 
       - name: Validate with flaresolverr profile
         env:
           COMPOSE_PROFILES: flaresolverr
-        run: docker compose config --quiet
+        run: docker compose -f docker-compose.yml config --quiet
 
       - name: Validate with VPN override
         env:
@@ -33,12 +33,5 @@ jobs:
           VPN_PASSWORD: ci
         run: docker compose -f docker-compose.yml -f docker-compose.vpn.yml config --quiet
 
-      - name: Check init-db.sh is executable and syntactically valid
-        run: |
-          test -x init-db.sh
-          bash -n init-db.sh
-
-      - name: Check init-secrets.sh is executable and syntactically valid
-        run: |
-          test -x init-secrets.sh
-          sh -n init-secrets.sh
+      - name: Validate maintainer override example
+        run: docker compose -f docker-compose.yml -f docker-compose.override.example.yml config --quiet

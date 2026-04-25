@@ -1,0 +1,42 @@
+# ============================================================================
+# Beacon Stack — local override (maintainer / dev only)
+#
+# Copy this file to docker-compose.override.yml and fill in your paths:
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+#
+# docker-compose.override.yml is gitignored and auto-loaded by plain
+# `docker compose` — so `docker compose up -d` merges it automatically.
+#
+# End users don't need this file — they edit the /path/to/... lines in
+# docker-compose.yml directly. This file exists so maintainers can keep
+# their personal bind mounts (TrueNAS datasets, local test dirs) out of
+# the public compose.
+# ============================================================================
+
+services:
+
+  pulse:
+    volumes:
+      - /your/local/path/to/pulse/config:/config
+
+  pilot:
+    volumes:
+      - /your/local/path/to/pilot/config:/config
+      - /your/local/path/to/tv:/tv
+      - /your/local/path/to/downloads:/downloads
+
+  prism:
+    volumes:
+      - /your/local/path/to/prism/config:/config
+      - /your/local/path/to/movies:/movies
+      - /your/local/path/to/downloads:/downloads
+
+  haul:
+    volumes:
+      - /your/local/path/to/haul/config:/config
+      - /your/local/path/to/downloads:/downloads
+
+  # Only needed if you're loading docker-compose.vpn.yml.
+  # vpn:
+  #   volumes:
+  #     - /your/local/path/to/gluetun/config:/gluetun

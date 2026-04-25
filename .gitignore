@@ -1,16 +1,14 @@
 # Environment file (contains user-specific config)
 .env
 
-# Docker secret files (contain passwords)
-secrets/*.txt
-!secrets/*.txt.example
+# Local compose override — per-maintainer bind mounts, TrueNAS paths,
+# testing config. Auto-loaded by `docker compose` alongside the base file.
+docker-compose.override.yml
 
-# Runtime data created by the stack
+# Runtime data created by the stack (only present when the maintainer
+# override binds these into the container; end users bring their own)
 data/
 config/
-
-# Postgres data (if someone bind-mounts it instead of using the named volume)
-pgdata/
 
 # OS files
 .DS_Store
