@@ -15,10 +15,10 @@ Docker Compose deployment for the full Beacon media management stack. Clone the 
 | Service | Purpose |
 |---|---|
 | **Postgres** | Shared database for all Beacon apps |
-| **Pulse** | Control plane — manages indexers, quality profiles, and settings shared across all apps |
+| **Pulse** | Control plane — central registry; manages indexers, quality profiles, download clients, and shared media-handling settings, and pushes them to every registered service |
 | **Pilot** | TV series manager — monitors episodes, scores releases, and kicks off grabs |
 | **Prism** | Movie collection manager — edition-aware release scoring, Radarr v3 API compatible |
-| **Haul** | BitTorrent client with stall detection and a VPN-aware dashboard |
+| **Haul** | BitTorrent client with multi-level stall detection (catches dead torrents that look healthy on paper) and an in-band VPN-aware dashboard |
 | _Gluetun_ | Optional — VPN tunnel for Haul. See [Enabling VPN](#enabling-vpn). |
 | _FlareSolverr_ | Optional — Cloudflare challenge solver. See [FlareSolverr](#flaresolverr). |
 
@@ -39,7 +39,7 @@ graph TD
     PRISM -->|grab torrent| HAUL
 ```
 
-Pulse is the hub. Pilot, Prism, and Haul all register with it on startup and pull shared indexers and quality profiles. When Pilot or Prism grabs a release, the torrent goes to Haul.
+Pulse is the hub. Pilot, Prism, and Haul all register with it on startup. Pilot and Prism pull indexers, quality profiles, download clients, and shared media-handling settings from Pulse on a 30-second sync (and immediately when Pulse pushes a change). Haul registers itself as a download client, so Pulse hands its address out to Pilot and Prism without any manual UI step. When Pilot or Prism grabs a release, the torrent goes to Haul.
 
 ---
 
@@ -95,7 +95,7 @@ Everything should show `healthy`:
 - Prism → [http://localhost:8282](http://localhost:8282)
 - Haul → [http://localhost:8484](http://localhost:8484)
 
-Each app generates an API key on first run; find it in Settings.
+Each app generates its own API key on first run and persists it to `${<APP>_CONFIG_PATH}/config.yaml` (so it's stable across restarts). Pilot and Prism additionally surface theirs in Settings → Application for use by external tools (Homepage, Home Assistant, Radarr v3 clients, etc.). Pulse's and Haul's keys are config-only — services on the bridge network discover and authenticate via Pulse's registration handshake, so you only need to read those files directly if you're talking to Pulse or Haul from outside the stack.
 
 ---
 
@@ -112,15 +112,18 @@ Each app generates an API key on first run; find it in Settings.
 
 ## Connecting the apps
 
-After the stack is up, two things to wire manually through the UIs:
+Most of the wiring is automatic. On startup, Pilot, Prism, and Haul each register themselves with Pulse using auto-discovered API keys; you do **not** need to copy keys between UIs or add Haul as a download client by hand.
 
-**1. Add Haul as a download client in Pilot and Prism.**
+What flows automatically from Pulse to Pilot and Prism:
 
-In each app's Settings, add a download client with URL `http://haul:8484` and the API key from Haul's Settings page. (If you've enabled the VPN override, use `http://vpn:8484` instead — see [Enabling VPN](#enabling-vpn).)
+- **Indexers** — add a Torznab/Newznab indexer once in Pulse, and Pilot and Prism pick it up within 30 seconds (Pulse also fires a push hook on save, so it's usually instant).
+- **Quality profiles** — managed centrally; profiles created in Pulse appear as read-only entries in Pilot/Prism. Local-only profiles still work for per-app overrides.
+- **Download clients** — when Haul registers, Pulse auto-creates a download-client entry for it (`host: haul`, `port: 8484`, API key shared via the registration handshake). Pilot and Prism then sync that entry into their own download-client lists.
+- **Shared media-handling settings** — colon replacement, rename-files toggle, extra file extensions. Set in Pulse, applied to Pilot and Prism on next sync.
 
-**2. Indexers and quality profiles flow automatically through Pulse.**
+The one thing you'll typically do in Pulse's UI on first run is open the Indexers page and add your Torznab/Newznab providers. Everything else is wired by the registration handshake.
 
-Pilot, Prism, and Haul register with Pulse on startup. Add indexers in Pulse's web UI and they're available to every registered service immediately.
+> **VPN override note.** When the VPN override is active, Haul shares Gluetun's network namespace and other services reach it as `vpn:8484` instead of `haul:8484`. Haul advertises this hostname during registration, so the auto-registered download-client entry resolves correctly without manual edits.
 
 ---
 
@@ -157,7 +160,7 @@ Postgres is **not** published by default. Add a `ports:` block in `docker-compos
 
 ### Config storage
 
-Each app's `/config` directory (database files, API keys, settings) defaults to `./config/<app>` next to the compose file. Override per-app if you want configs on a different volume:
+Each app's `/config` directory (`config.yaml`, log files, per-app cached state) defaults to `./config/<app>` next to the compose file. Application data lives in Postgres, so configs are small. Override per-app if you want configs on a different volume:
 
 ```env
 PULSE_CONFIG_PATH=/var/lib/beacon/pulse
@@ -239,13 +242,14 @@ Comment out the `COMPOSE_FILE` line in `.env` (or drop the `-f docker-compose.vp
 
 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a Cloudflare challenge solver for indexers behind Cloudflare bot protection. Most users don't need it.
 
-Enable it by adding this line to `.env`:
+Enable it in two places:
 
 ```env
+# in .env
 COMPOSE_PROFILES=flaresolverr
 ```
 
-Then `docker compose up -d`. In Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
+…then in `docker-compose.yml`, uncomment the `PULSE_FLARESOLVERR_URL` line in the `pulse` service so Pulse's torznab scraper actually routes through it. Run `docker compose up -d`. Pulse picks it up on next restart and uses it transparently for indexers that return Cloudflare challenges.
 
 ---
 
@@ -276,6 +280,12 @@ Each app runs its own database migrations on startup.
 
 **A service never goes healthy**
 - `docker compose logs <service>` names the problem. Most common: Postgres still initializing (wait 30s), or Pulse can't see itself (restart; Goose migrations are idempotent).
+
+**Indexer or download client added in Pulse doesn't show up in Pilot/Prism**
+- Pilot and Prism sync from Pulse on a 30-second poll, plus a push hook on save. Wait up to 30 seconds, or check `docker compose logs pilot` / `prism` for `pulse: indexer sync complete` lines. Synced entries appear with a Pulse marker and are read-only in the consumer's UI.
+
+**Pilot or Prism never auto-registered Haul as a download client**
+- Haul has to register with Pulse first (look for `pulse: auto-registered download-client service` in `docker compose logs pulse`). If Pulse logs show registration but Pilot/Prism still don't see it, force a sync with `docker compose restart pilot prism`.
 
 **VPN won't connect** (when VPN override active)
 - Check `VPN_USERNAME` and `VPN_PASSWORD` in `.env`.
