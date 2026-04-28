@@ -306,7 +306,7 @@ cp .env.dev.example .env
 docker compose up -d --build
 ```
 
-`docker-compose.dev.yml` adds `build: ../<repo>` to each service; `.env.dev.example` points config paths at `~/.config/beacon/*` and media at `/opt/media/*` so rebuilds don't wipe your UI settings.
+`docker-compose.dev.yml` adds `build: ../<repo>` to each service so each `docker compose up -d --build` rebuilds against your local source. App configs land in `./config/<app>` next to the compose file (gitignored), so rebuilds don't wipe your UI settings. For local bind mounts to your media library, drop them into `docker-compose.override.yml` — see `docker-compose.override.example.yml`.
 
 Rebuild a single service after local changes:
 
