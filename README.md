@@ -1,12 +1,12 @@
 # Beacon Stack — Deploy
 
-Docker Compose deployment for the full Beacon media management stack. Clone the repo, run one command, done.
+Docker Compose deployment for the full Beacon media management stack. Clone the repo, set three paths, run one command.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker required](https://img.shields.io/badge/Docker-24%2B-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/get-docker/)
 [![beaconstack.io](https://img.shields.io/badge/beaconstack.io-website-4f46e5)](https://beaconstack.io)
 
-[Quick start](#quick-start) · [Services](#services) · [Enabling VPN](#enabling-vpn) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Services](#services) · [Configuration](#configuration) · [Enabling VPN](#enabling-vpn) · [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -47,13 +47,40 @@ Pulse is the hub. Pilot, Prism, and Haul all register with it on startup and pul
 
 **Prerequisites:** Docker Engine 24+ and Docker Compose v2.20+, 2 GB available RAM.
 
+### 1. Clone
+
 ```bash
 git clone https://github.com/beacon-stack/deploy.git
 cd deploy
+```
+
+### 2. Set your media paths
+
+Copy the example env file and edit three lines:
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and point these at real directories on your host:
+
+```env
+TV_PATH=/opt/media/tv
+MOVIES_PATH=/opt/media/movies
+DOWNLOADS_PATH=/opt/media/downloads
+```
+
+> **Same filesystem rule.** All three must live on the same filesystem. Beacon uses hardlinks + atomic moves for imports — across filesystems it falls back to slow file copies that double your disk usage. The simplest layout is one root with three subdirs (e.g. `/opt/media/{tv,movies,downloads}`).
+
+That's the only required edit. Everything else in `.env` is optional with sensible defaults.
+
+### 3. Start
+
+```bash
 docker compose up -d
 ```
 
-That's it. On first start, an `init-secrets` sidecar generates random database passwords into a dedicated Docker volume, Postgres initializes with a user+db per app, and the four Beacon apps start up and register with Pulse. No pre-setup scripts to run, no `.env` to edit for defaults.
+On first start, an `init-secrets` sidecar generates random database passwords into a Docker-managed volume, Postgres initializes with a user+db per app, and the four Beacon apps come up and register with Pulse. No setup scripts, no manual password prompts.
 
 **Verify:**
 
@@ -97,11 +124,83 @@ Pilot, Prism, and Haul register with Pulse on startup. Add indexers in Pulse's w
 
 ---
 
+## Configuration
+
+All customization happens in `.env`. The `docker-compose.yml` itself reads values from `.env` via `${VAR:-default}` substitution — you should rarely need to edit the compose file directly.
+
+### Media paths
+
+The three paths set in [Quick start](#quick-start) are the most important values. If you run on a NAS or split storage, you can also override them per-service — but remember the [same-filesystem rule](#2-set-your-media-paths) for hardlinks.
+
+```env
+TV_PATH=/mnt/tank/media/tv
+MOVIES_PATH=/mnt/tank/media/movies
+DOWNLOADS_PATH=/mnt/tank/media/downloads
+```
+
+Pilot, Prism, and Haul all see `DOWNLOADS_PATH` so they can import or hardlink completed downloads.
+
+### Ports
+
+Each web UI port is overridable for hosts where the default conflicts:
+
+```env
+PULSE_PORT=9696
+PILOT_PORT=8383
+PRISM_PORT=8282
+HAUL_PORT=8484
+HAUL_TORRENT_PORT=6881
+FLARESOLVERR_PORT=8191
+```
+
+Postgres is **not** published by default. Add a `ports:` block in `docker-compose.override.yml` if you need direct access.
+
+### Config storage
+
+Each app's `/config` directory (database files, API keys, settings) defaults to `./config/<app>` next to the compose file. Override per-app if you want configs on a different volume:
+
+```env
+PULSE_CONFIG_PATH=/var/lib/beacon/pulse
+```
+
+### Timezone
+
+```env
+TZ=America/New_York
+```
+
+Defaults to `UTC`. Used by all services for log timestamps and scheduled tasks. Any [IANA timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) works.
+
+### Secrets handling
+
+Database passwords are generated on first run by the `init-secrets` sidecar (which executes `scripts/init-secrets.sh`) and stored in a Docker-managed volume (`beacon-secrets`). They never appear in `.env`, `docker-compose.yml`, or `docker inspect` output.
+
+| What | Where |
+|---|---|
+| Per-app DB passwords | `beacon-secrets` volume, mounted read-only at `/run/secrets/<app>.txt` |
+| Postgres superuser password | Same — `/run/secrets/pg.txt` |
+| VPN credentials | `VPN_USERNAME` / `VPN_PASSWORD` env vars (only when VPN override is active) |
+
+To inspect a password (admin only):
+
+```bash
+docker run --rm -v beacon-secrets:/s alpine cat /s/pulse.txt
+```
+
+To rotate passwords: stop the stack, drop both volumes, start again. **All DB data is lost** — Postgres bakes the old password hashes into `pgdata`.
+
+```bash
+docker compose down -v
+docker compose up -d
+```
+
+---
+
 ## Enabling VPN
 
 VPN is off by default. To route Haul's torrent traffic through [Gluetun](https://github.com/qdm12/gluetun):
 
-**1. Set VPN credentials in `.env`:**
+**1. Set credentials and enable the overlay in `.env`:**
 
 ```env
 VPN_USERNAME=your-vpn-username
@@ -128,61 +227,11 @@ VPN_SERVER_REGIONS=Netherlands
 VPN_PORT_FORWARDING=on                          # PIA and ProtonVPN support this
 ```
 
-For WireGuard, set `VPN_TYPE=wireguard` and uncomment the `WIREGUARD_*` lines in `docker-compose.vpn.yml`.
+For WireGuard, set `VPN_TYPE=wireguard` and uncomment the `WIREGUARD_*` lines in both `.env` and `docker-compose.vpn.yml`.
 
 ### Disabling VPN
 
-Remove the `COMPOSE_FILE` line from `.env` (or drop the `-f docker-compose.vpn.yml` from your command). Haul reattaches directly to the bridge network on the next `docker compose up -d`.
-
----
-
-## Configuration
-
-### Environment variables
-
-The stack ships with defaults that work out of the box. Override them by creating a `.env`:
-
-```bash
-cp .env.example .env
-# edit .env
-```
-
-Common overrides: port numbers, media paths, FlareSolverr URL, log levels. See `.env.example` for the full list with defaults.
-
-### Secrets handling
-
-DB passwords are generated on first run by the `init-secrets` sidecar and stored in a Docker-managed volume (`beacon-secrets`). They never appear in `.env`, `docker-compose.yml`, or `docker inspect` output.
-
-| What | Where |
-|---|---|
-| Per-app DB passwords | `beacon-secrets` volume, mounted read-only at `/run/secrets/<app>.txt` |
-| Postgres superuser password | Same — `/run/secrets/pg.txt` |
-| VPN credentials | `VPN_USERNAME` / `VPN_PASSWORD` env vars (only needed when VPN override is active) |
-
-To inspect a password (admin only):
-
-```bash
-docker run --rm -v beacon-secrets:/s alpine cat /s/pulse.txt
-```
-
-To rotate passwords: stop the stack, drop both volumes, start again. **All DB data is lost** — Postgres bakes the old password hashes into `pgdata`.
-
-```bash
-docker compose down -v
-docker compose up -d
-```
-
-### Media paths
-
-Default paths are relative to the deploy directory (`./data/downloads`, `./data/tv`, `./data/movies`). Override for NAS mounts or existing libraries:
-
-```env
-DOWNLOADS_PATH=/mnt/nas/downloads
-TV_PATH=/mnt/nas/media/tv
-MOVIES_PATH=/mnt/nas/media/movies
-```
-
-Pilot, Prism, and Haul all see `DOWNLOADS_PATH` so they can import or hardlink completed downloads.
+Comment out the `COMPOSE_FILE` line in `.env` (or drop the `-f docker-compose.vpn.yml` from your command). Haul reattaches directly to the bridge network on the next `docker compose up -d`.
 
 ---
 
@@ -190,13 +239,25 @@ Pilot, Prism, and Haul all see `DOWNLOADS_PATH` so they can import or hardlink c
 
 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a Cloudflare challenge solver for indexers behind Cloudflare bot protection. Most users don't need it.
 
-Enable it with `COMPOSE_PROFILES=flaresolverr` in `.env`, then:
+Enable it by adding this line to `.env`:
 
-```bash
-docker compose up -d
+```env
+COMPOSE_PROFILES=flaresolverr
 ```
 
-In Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
+Then `docker compose up -d`. In Pulse: Settings → FlareSolverr URL → `http://flaresolverr:8191`.
+
+---
+
+## How the compose file is structured
+
+If you peek at `docker-compose.yml` and want a map of what's there:
+
+- **YAML anchors at the top** (`x-logging`, `x-healthcheck`, `x-app-env`) define reusable blocks. The `&name` line declares a block; `<<: *name` inside a service merges it in. This is why each service block is short — the boilerplate (logging driver, healthcheck timing, timezone) lives in the anchor.
+- **Two init sidecars** (`init-secrets`, `init-databases`) run once at startup, then exit. Their actual logic is in `scripts/init-secrets.sh` and `scripts/init-databases.sh` — the compose just bind-mounts the script and runs it.
+- **Service order** follows the dependency chain: secrets → postgres → databases → pulse → pilot/prism/haul. `depends_on` enforces it.
+
+You don't need to touch any of this for normal use. It's documented here so the file isn't a black box.
 
 ---
 
@@ -221,15 +282,18 @@ Each app runs its own database migrations on startup.
 - Confirm the provider name matches Gluetun's expected value — see the [Gluetun wiki](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers).
 - `docker compose logs vpn`
 
+**`!reset` causing errors when loading the VPN overlay**
+- You're on Docker Compose < 2.20. Run `docker compose version` to check, then upgrade — `!reset` was added in Dec 2023 and is required for the VPN override to work correctly.
+
 **Haul can't reach Postgres or Pulse** (VPN override active)
 - Haul shares Gluetun's network namespace. Gluetun is attached to `beacon-net` and its firewall allow-lists the bridge subnet via `FIREWALL_OUTBOUND_SUBNETS=172.28.0.0/16`.
 - If you changed the `beacon-net` subnet, update `FIREWALL_OUTBOUND_SUBNETS` in `docker-compose.vpn.yml` to match.
 
 **Port conflicts**
-- If another host service uses 9696, 8383, 8282, or 8484, change the corresponding `*_PORT` variable in `.env`. Postgres is not published by default; uncomment the `ports:` block in `docker-compose.yml` to expose it.
+- If another host service uses 9696, 8383, 8282, or 8484, change the corresponding `*_PORT` variable in `.env`. Postgres is not published by default; add a `ports:` block in `docker-compose.override.yml` to expose it.
 
 **Starting over**
-- `docker compose down -v` drops pgdata and beacon-secrets. Next `docker compose up -d` is a full fresh start. App configs under `${PULSE_CONFIG_PATH}` etc. are not in Docker volumes — delete them manually if you also want fresh API keys.
+- `docker compose down -v` drops `pgdata` and `beacon-secrets`. The next `docker compose up -d` is a full fresh start. App configs under `${PULSE_CONFIG_PATH}` etc. are bind-mounted to the host — delete them manually if you also want fresh API keys.
 
 ---
 

@@ -6,16 +6,21 @@
 # bridge network.
 #
 # Quick start:
-#   1. Create a .env with your VPN credentials (see .env.example).
-#   2. docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
+#   1. Set VPN_USERNAME and VPN_PASSWORD in .env.
+#   2. Uncomment the COMPOSE_FILE line in .env so plain `docker compose`
+#      picks up this override automatically.
+#   3. docker compose up -d
 #
-# Or set COMPOSE_FILE in .env so plain `docker compose` picks it up:
-#   COMPOSE_FILE=docker-compose.yml:docker-compose.vpn.yml
+# Or run with explicit -f flags every time:
+#   docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
 #
-# Provider config (defaults to PIA / OpenVPN / Netherlands) can be tuned
-# via the environment block below.
+# Provider config defaults to PIA / OpenVPN / Netherlands. Override any of
+# it via .env (see .env.example).
 #
-# Requires Docker Compose v2.20+ for the `!reset` tag.
+# Requires Docker Compose v2.20+ (Dec 2023) for the `!reset` tag used below.
+# Older Compose silently merges instead of replacing — Haul ends up half-
+# attached to the VPN and torrent traffic leaks. Check with `docker compose
+# version`.
 # ============================================================================
 
 services:
@@ -30,49 +35,81 @@ services:
   # through tun0.
   vpn:
     image: qmcgaw/gluetun:latest
-    container_name: beacon-vpn
+    container_name: vpn
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      VPN_SERVICE_PROVIDER: private internet access
-      VPN_TYPE: openvpn
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-private internet access}
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
       OPENVPN_USER: ${VPN_USERNAME:?VPN_USERNAME must be set in .env to use the VPN override}
       OPENVPN_PASSWORD: ${VPN_PASSWORD:?VPN_PASSWORD must be set in .env to use the VPN override}
-      # WireGuard auth — uncomment these and change VPN_TYPE above to wireguard
+      # WireGuard auth — uncomment these and set VPN_TYPE=wireguard in .env.
       # WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
       # WIREGUARD_ADDRESSES:   ${WIREGUARD_ADDRESSES}
-      SERVER_REGIONS: Netherlands
-      VPN_PORT_FORWARDING: on
-      FIREWALL_VPN_INPUT_PORTS: 6881
-      FIREWALL_INPUT_PORTS: 8484
+      SERVER_REGIONS: ${VPN_SERVER_REGIONS:-Netherlands}
+      VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING:-on}
+      # PIA / ProtonVPN hand out a *dynamic* forwarded port (typically a
+      # high number like 29607). Without this redirect, peers connecting
+      # to that forwarded port hit Gluetun's firewall but never reach
+      # Haul (which listens on 6881). VPN_PORT_FORWARDING_LISTENING_PORT
+      # adds an iptables DNAT inside the VPN container that maps the
+      # forwarded port → Haul's listen port. Result: torrents see real
+      # incoming peer connections and actually download instead of
+      # stalling at "11 peers, 0 bytes".
+      VPN_PORT_FORWARDING_LISTENING_PORT: ${HAUL_TORRENT_PORT:-6881}
+      FIREWALL_VPN_INPUT_PORTS: ${HAUL_TORRENT_PORT:-6881}
+      FIREWALL_INPUT_PORTS: ${HAUL_PORT:-8484}
       FIREWALL_OUTBOUND_SUBNETS: 172.28.0.0/16
-      TZ: UTC
+      # Gluetun control server — no published port, only reachable on
+      # beacon-net so Pulse can read VPN status (public IP, country,
+      # port-forwarded, kill-switch). Disable by setting to "" or removing.
+      HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+      HTTP_CONTROL_SERVER_LOG: "off"
+      TZ: ${TZ:-UTC}
     networks:
       - beacon-net
     ports:
       # Haul shares this container's network namespace; its ports are
       # published here instead of on the haul service.
-      - "8484:8484"
-      - "6881:6881/tcp"
-      - "6881:6881/udp"
+      - "${HAUL_PORT:-8484}:8484"
+      - "${HAUL_TORRENT_PORT:-6881}:6881/tcp"
+      - "${HAUL_TORRENT_PORT:-6881}:6881/udp"
     volumes:
-      - ${GLUETUN_CONFIG_PATH:-/path/to/gluetun/config}:/gluetun
-    # No custom healthcheck — Gluetun's built-in queries its control
-    # server for tunnel status. Our previous override hit `/` and got a
-    # 404, which marked the container unhealthy even when the VPN was up.
+      - ${GLUETUN_CONFIG_PATH:-./config/gluetun}:/gluetun
+    configs:
+      # Gluetun ≥3.40 ships a default control-server auth config that
+      # requires API keys on most endpoints, including /v1/version and
+      # /v1/publicip/ip. The control server is only reachable on
+      # beacon-net (no published port), so we override the auth config
+      # to make the read-only endpoints Pulse polls publicly readable.
+      # Without this, Pulse's VPN panel stays blank with a stream of
+      # 401s in pulse logs.
+      - source: gluetun-auth
+        target: /gluetun/auth/config.toml
+    # No custom healthcheck — Gluetun's built-in queries its control server
+    # for tunnel status. Our previous override hit `/` and got a 404, which
+    # marked the container unhealthy even when the VPN was up.
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
+  # Pulse — wire it to Gluetun's control server so the dashboard's VPN panel
+  # populates. No new published port; Pulse reaches it via service DNS on
+  # beacon-net. Set PULSE_DASHBOARD_GLUETUN_URL to "" in .env to disable.
+  pulse:
+    environment:
+      PULSE_DASHBOARD_GLUETUN_URL: ${PULSE_DASHBOARD_GLUETUN_URL:-http://vpn:8000}
+
   # Haul — override to tunnel through Gluetun.
-  # `!reset` clears the base compose's 'ports' and 'networks' keys
-  # (required because network_mode: service:X is mutually exclusive with
-  # both).
+  # `!reset` (Compose v2.20+) clears the base compose's `ports` and
+  # `networks` keys. Required because `network_mode: service:X` is mutually
+  # exclusive with both — without !reset, Compose merges instead of
+  # replaces and the override silently breaks.
   haul:
     network_mode: service:vpn
     ports: !reset []
@@ -82,3 +119,22 @@ services:
         condition: service_completed_successfully
       vpn:
         condition: service_healthy
+
+# Inline auth config dropped into Gluetun's control server. Roles with
+# auth = "none" let any client on beacon-net read the listed endpoints
+# without an API key — fine because the port isn't published.
+# https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/control-server.md
+configs:
+  gluetun-auth:
+    content: |
+      [[roles]]
+      name = "pulse-dashboard"
+      routes = [
+          "GET /v1/version",
+          "GET /v1/publicip/ip",
+          "GET /v1/openvpn/portforwarded",
+          "GET /v1/openvpn/settings",
+          "GET /v1/dns/status",
+          "GET /v1/openvpn/status",
+      ]
+      auth = "none"

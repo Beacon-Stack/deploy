@@ -1,42 +1,39 @@
 # ============================================================================
-# Beacon Stack — local override (maintainer / dev only)
+# Beacon Stack — local override (advanced)
 #
-# Copy this file to docker-compose.override.yml and fill in your paths:
+# Most users won't need this file. For media paths, ports, PUID/PGID, etc.,
+# just edit .env — that covers 99% of customization.
+#
+# Use docker-compose.override.yml only for things .env can't do:
+#   - Extra bind mounts (e.g., a second media library)
+#   - Adding sysctls / cap_add for a specific deployment
+#   - Overriding healthcheck timing for slow hardware
+#
+# Setup:
 #   cp docker-compose.override.example.yml docker-compose.override.yml
+#   # edit it
 #
-# docker-compose.override.yml is gitignored and auto-loaded by plain
-# `docker compose` — so `docker compose up -d` merges it automatically.
-#
-# End users don't need this file — they edit the /path/to/... lines in
-# docker-compose.yml directly. This file exists so maintainers can keep
-# their personal bind mounts (TrueNAS datasets, local test dirs) out of
-# the public compose.
+# `docker-compose.override.yml` is gitignored and auto-loaded by plain
+# `docker compose` — it merges on top of docker-compose.yml automatically.
 # ============================================================================
 
-services:
+# `services: {}` keeps this file a valid compose document so CI can
+# validate it as-is. Replace with real overrides — see examples below.
+services: {}
 
-  pulse:
-    volumes:
-      - /your/local/path/to/pulse/config:/config
+# Example: mount a second TV library read-only.
+# services:
+#   pilot:
+#     volumes:
+#       - /mnt/archive/tv:/tv-archive:ro
 
-  pilot:
-    volumes:
-      - /your/local/path/to/pilot/config:/config
-      - /your/local/path/to/tv:/tv
-      - /your/local/path/to/downloads:/downloads
+# Example: relax healthcheck timing for slow CPUs / NAS hardware.
+# services:
+#   pulse:
+#     healthcheck:
+#       start_period: 60s
 
-  prism:
-    volumes:
-      - /your/local/path/to/prism/config:/config
-      - /your/local/path/to/movies:/movies
-      - /your/local/path/to/downloads:/downloads
-
-  haul:
-    volumes:
-      - /your/local/path/to/haul/config:/config
-      - /your/local/path/to/downloads:/downloads
-
-  # Only needed if you're loading docker-compose.vpn.yml.
-  # vpn:
-  #   volumes:
-  #     - /your/local/path/to/gluetun/config:/gluetun
+# Example: pin a specific image tag instead of `:latest`.
+# services:
+#   prism:
+#     image: ghcr.io/beacon-stack/prism:v1.4.2

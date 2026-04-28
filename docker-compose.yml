@@ -2,34 +2,44 @@
 # Beacon Stack — self-hosted media management
 # https://beaconstack.io
 #
-# Quick start:
-#   1. Edit the /path/to/... lines below to point at your storage.
-#   2. docker compose up -d
+# First run:
+#   1. cp .env.example .env
+#   2. Edit .env — at minimum set TV_PATH, MOVIES_PATH, DOWNLOADS_PATH to point
+#      at your storage. (Same filesystem, see note below.)
+#   3. docker compose up -d
 #
-# That's it. A one-shot sidecar generates random database passwords on
-# first run and stores them in a Docker-managed volume. Web UIs:
-#   - Pulse:  http://localhost:9696
-#   - Pilot:  http://localhost:8383  (TV)
-#   - Prism:  http://localhost:8282  (Movies)
-#   - Haul:   http://localhost:8484  (Torrent client)
+# Web UIs:  Pulse :9696 · Pilot :8383 · Prism :8282 · Haul :8484
 #
-# IMPORTANT: your TV/Movies library and downloads directory must sit on
-# the SAME filesystem. Imports use hardlinks + atomic moves; if the two
-# paths are on different filesystems, the stack falls back to copies
-# (slow, wastes disk). Easiest setup: put everything under one root
-# (e.g. /opt/media/tv, /opt/media/movies, /opt/media/downloads).
+# IMPORTANT: TV_PATH, MOVIES_PATH, and DOWNLOADS_PATH must sit on the SAME
+# filesystem. Imports use hardlinks + atomic moves; on different filesystems
+# the stack falls back to copies (slow, wastes disk). Easiest layout:
+# everything under one root, e.g. /opt/media/{tv,movies,downloads}.
 #
 # Optional:
-#   - VPN tunnel for Haul (see docker-compose.vpn.yml)
-#   - FlareSolverr for Cloudflare-protected indexers:
-#       COMPOSE_PROFILES=flaresolverr docker compose up -d
+#   - VPN tunnel for Haul:        see docker-compose.vpn.yml
+#   - FlareSolverr (Cloudflare):  COMPOSE_PROFILES=flaresolverr in .env
 # ============================================================================
+
+# YAML anchors below cut ~50 lines of boilerplate. Each &name defines a
+# reusable block; <<: *name merges it into a service. Edit once, applies
+# everywhere.
 
 x-logging: &default-logging
   driver: json-file
   options:
     max-size: "10m"
     max-file: "3"
+
+x-healthcheck: &healthcheck-base
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+# Shared env for all four Beacon services. Per-service env (DB DSN, ports)
+# is added in each service block.
+x-app-env: &app-env
+  TZ: ${TZ:-UTC}
 
 networks:
   beacon-net:
@@ -48,44 +58,33 @@ services:
   # Idempotent: skips files that already exist on subsequent runs.
   init-secrets:
     image: alpine:3.21
-    container_name: beacon-init-secrets
+    container_name: init-secrets
     restart: "no"
     volumes:
       - beacon-secrets:/secrets
-    entrypoint: ["sh", "-c"]
-    command:
-      - |
-        set -eu
-        for name in pg pulse pilot prism haul pulse-api-key; do
-          f="/secrets/$${name}.txt"
-          if [ ! -s "$$f" ]; then
-            head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "$$f"
-            echo "generated $$f"
-          fi
-          chmod 0444 "$$f"
-        done
+      - ./scripts:/scripts:ro
+    command: ["/scripts/init-secrets.sh"]
     logging: *default-logging
 
   postgres:
     image: postgres:17-alpine
-    container_name: beacon-postgres
+    container_name: postgres
     restart: unless-stopped
     depends_on:
       init-secrets:
         condition: service_completed_successfully
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/pg.txt
-      TZ: UTC
+      TZ: ${TZ:-UTC}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - beacon-secrets:/run/secrets:ro
     networks:
       - beacon-net
     healthcheck:
+      <<: *healthcheck-base
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
-      timeout: 5s
-      retries: 5
       start_period: 30s
     logging: *default-logging
 
@@ -93,63 +92,60 @@ services:
   # Postgres is healthy. Idempotent; does nothing on subsequent runs.
   init-databases:
     image: postgres:17-alpine
-    container_name: beacon-init-databases
+    container_name: init-databases
     restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - beacon-secrets:/run/secrets:ro
-    entrypoint: ["sh", "-c"]
-    command:
-      - |
-        set -eu
-        export PGPASSWORD="$$(cat /run/secrets/pg.txt)"
-        for name in pulse pilot prism haul; do
-          pw="$$(cat /run/secrets/$${name}.txt)"
-          exists=$$(psql -h postgres -U postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$$name'")
-          if [ "$$exists" != "1" ]; then
-            psql -h postgres -U postgres -v pw="$$pw" -c "CREATE USER $$name WITH PASSWORD :'pw'"
-          fi
-          dbexists=$$(psql -h postgres -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$${name}_db'")
-          if [ "$$dbexists" != "1" ]; then
-            psql -h postgres -U postgres -c "CREATE DATABASE $${name}_db OWNER $$name"
-          fi
-        done
+      - ./scripts:/scripts:ro
+    command: ["/scripts/init-databases.sh"]
     networks:
       - beacon-net
     logging: *default-logging
 
   pulse:
     image: ghcr.io/beacon-stack/pulse:latest
-    container_name: beacon-pulse
+    container_name: pulse
     restart: unless-stopped
     depends_on:
       init-databases:
         condition: service_completed_successfully
-    # DSN, secret-file paths, Pulse URL, TZ are baked into the image as
-    # ENV defaults (see pulse/Dockerfile). Only operator-facing knobs
-    # live here.
+    # Most env (DSN, secret-file paths, Pulse URL) is baked into the image.
+    # Only the operator-facing knobs live here.
     environment:
-      PULSE_LOG_LEVEL: info
+      <<: *app-env
+      PULSE_LOG_LEVEL: ${LOG_LEVEL:-info}
+      # OPT-IN: Docker socket access for per-container CPU / memory /
+      # network / IO on the dashboard. Disabled by default because the
+      # socket effectively grants root on the host on most Docker builds,
+      # even when mounted read-only. To enable: uncomment BOTH the env
+      # var below AND the docker.sock volume mount further down.
+      # PULSE_DASHBOARD_DOCKER_SOCKET: /var/run/docker.sock
+      # OPT-IN: FlareSolverr — used by Pulse's torznab scraper to bypass
+      # Cloudflare challenges on indexers like 1337x and kickasstorrents
+      # that otherwise return HTTP 403. Disabled by default. To enable,
+      # uncomment the line below and add COMPOSE_PROFILES=flaresolverr
+      # to your .env (which also starts the flaresolverr container).
+      # PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-http://flaresolverr:8191}
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - /path/to/pulse/config:/config
+      - ${PULSE_CONFIG_PATH:-./config/pulse}:/config
+      # OPT-IN: uncomment together with PULSE_DASHBOARD_DOCKER_SOCKET above.
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - beacon-net
     ports:
-      - "9696:9696"
+      - "${PULSE_PORT:-9696}:9696"
     healthcheck:
+      <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9696/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
     logging: *default-logging
 
   pilot:
     image: ghcr.io/beacon-stack/pilot:latest
-    container_name: beacon-pilot
+    container_name: pilot
     restart: unless-stopped
     depends_on:
       init-databases:
@@ -157,27 +153,25 @@ services:
       pulse:
         condition: service_healthy
     environment:
-      PILOT_LOG_LEVEL: info
+      <<: *app-env
+      PILOT_LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - /path/to/pilot/config:/config
-      - /path/to/tv:/tv                  # optional
-      - /path/to/downloads:/downloads    # optional
+      - ${PILOT_CONFIG_PATH:-./config/pilot}:/config
+      - ${TV_PATH:-/path/to/tv}:/tv
+      - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
     networks:
       - beacon-net
     ports:
-      - "8383:8383"
+      - "${PILOT_PORT:-8383}:8383"
     healthcheck:
+      <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8383/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
     logging: *default-logging
 
   prism:
     image: ghcr.io/beacon-stack/prism:latest
-    container_name: beacon-prism
+    container_name: prism
     restart: unless-stopped
     depends_on:
       init-databases:
@@ -185,62 +179,59 @@ services:
       pulse:
         condition: service_healthy
     environment:
-      PRISM_LOG_LEVEL: info
+      <<: *app-env
+      PRISM_LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - /path/to/prism/config:/config
-      - /path/to/movies:/movies          # optional
-      - /path/to/downloads:/downloads    # optional
+      - ${PRISM_CONFIG_PATH:-./config/prism}:/config
+      - ${MOVIES_PATH:-/path/to/movies}:/movies
+      - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
     networks:
       - beacon-net
     ports:
-      - "8282:8282"
+      - "${PRISM_PORT:-8282}:8282"
     healthcheck:
+      <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8282/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
     logging: *default-logging
 
   haul:
     image: ghcr.io/beacon-stack/haul:latest
-    container_name: beacon-haul
+    container_name: haul
     restart: unless-stopped
     depends_on:
       init-databases:
         condition: service_completed_successfully
     environment:
-      HAUL_LOG_LEVEL: info
+      <<: *app-env
+      HAUL_LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - beacon-secrets:/run/secrets:ro
-      - /path/to/haul/config:/config
-      - /path/to/downloads:/downloads
+      - ${HAUL_CONFIG_PATH:-./config/haul}:/config
+      - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
     networks:
       - beacon-net
     ports:
-      - "8484:8484"
-      - "6881:6881/tcp"
-      - "6881:6881/udp"
+      - "${HAUL_PORT:-8484}:8484"
+      - "${HAUL_TORRENT_PORT:-6881}:6881/tcp"
+      - "${HAUL_TORRENT_PORT:-6881}:6881/udp"
     healthcheck:
+      <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8484/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
       start_period: 30s
     logging: *default-logging
 
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: beacon-flaresolverr
+    container_name: flaresolverr
     restart: unless-stopped
     profiles:
       - flaresolverr
     environment:
-      LOG_LEVEL: info
-      TZ: UTC
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TZ: ${TZ:-UTC}
     networks:
       - beacon-net
     ports:
-      - "8191:8191"
+      - "${FLARESOLVERR_PORT:-8191}:8191"
     logging: *default-logging
