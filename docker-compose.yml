@@ -211,10 +211,22 @@ services:
       # registry.
       HAUL_ADMIN_DIAGNOSTICS_ENABLED: ${HAUL_ADMIN_DIAGNOSTICS_ENABLED:-false}
       HAUL_CLEANUP_RETENTION_DAYS: ${HAUL_CLEANUP_RETENTION_DAYS:-30}
+      # Watched folder for auto-adding .torrent files. Empty disables.
+      # Mount the host path you want haul to watch into the container
+      # via WATCH_PATH in .env (e.g. WATCH_PATH=/data/torrent-inbox →
+      # set HAUL_TORRENT_WATCH_DIR=/torrents-watch and add the bind
+      # mount below).
+      HAUL_TORRENT_WATCH_DIR: ${HAUL_TORRENT_WATCH_DIR:-}
     volumes:
       - beacon-secrets:/run/secrets:ro
       - ${HAUL_CONFIG_PATH:-./config/haul}:/config
       - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
+      # When HAUL_TORRENT_WATCH_DIR is set, also bind-mount the host
+      # watch directory at the same path inside the container. The
+      # default ${WATCH_PATH:-/dev/null} sentinel keeps this no-op when
+      # the operator hasn't opted in (mounting /dev/null over /dev/null
+      # is harmless).
+      - ${WATCH_PATH:-/dev/null}:${HAUL_TORRENT_WATCH_DIR:-/dev/null}
     networks:
       - beacon-net
     ports:
