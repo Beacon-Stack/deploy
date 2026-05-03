@@ -205,6 +205,12 @@ services:
     environment:
       <<: *app-env
       HAUL_LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Admin diagnostics tab (Settings → System → Diagnostics). Off by
+      # default; flip to "true" in .env when you need to inspect/clean
+      # orphan DB rows. See haul/internal/db/admin/ for the diagnostic
+      # registry.
+      HAUL_ADMIN_DIAGNOSTICS_ENABLED: ${HAUL_ADMIN_DIAGNOSTICS_ENABLED:-false}
+      HAUL_CLEANUP_RETENTION_DAYS: ${HAUL_CLEANUP_RETENTION_DAYS:-30}
     volumes:
       - beacon-secrets:/run/secrets:ro
       - ${HAUL_CONFIG_PATH:-./config/haul}:/config
