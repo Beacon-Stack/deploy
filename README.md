@@ -183,6 +183,7 @@ Database passwords are generated on first run by the `init-secrets` sidecar (whi
 | Per-app DB passwords | `beacon-secrets` volume, mounted read-only at `/run/secrets/<app>.txt` |
 | Postgres superuser password | Same — `/run/secrets/pg.txt` |
 | VPN credentials | `VPN_USERNAME` / `VPN_PASSWORD` env vars (only when VPN override is active) |
+| TMDB / Trakt provider keys | **Baked into the Pilot/Prism binaries at build time** via XOR-obfuscated ldflags. End users pull the prebuilt images (`ghcr.io/beacon-stack/pilot:latest`) and don't need the keys at all. Maintainers rebuilding from source provide them via shell env vars — see [Rebuilding pilot/prism](#rebuilding-pilotprism-from-source-maintainer). |
 
 To inspect a password (admin only):
 
@@ -273,6 +274,46 @@ docker compose up -d
 ```
 
 Each app runs its own database migrations on startup.
+
+---
+
+## Rebuilding pilot/prism from source (maintainer)
+
+End users **don't need this section** — `docker compose pull` gives you a prebuilt image with the TMDB/Trakt keys already baked in.
+
+If you're a maintainer rebuilding from source, the build needs `PILOT_TMDB_API_KEY` and `PRISM_TMDB_API_KEY` exported in your shell. The Dockerfiles enforce this — a build with empty keys aborts immediately rather than silently producing a 503-on-lookup binary.
+
+Recommended layout: keep the keys in `~/.config/beacon/secrets.env` (outside any repo, mode 0600), source it before building. Example file:
+
+```sh
+# ~/.config/beacon/secrets.env  (chmod 600, NEVER commit)
+export PILOT_TMDB_API_KEY=...
+export PRISM_TMDB_API_KEY=$PILOT_TMDB_API_KEY
+export PILOT_TRAKT_CLIENT_ID=...     # optional
+```
+
+Rebuild + redeploy:
+
+```bash
+. ~/.config/beacon/secrets.env
+COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.vpn.yml:docker-compose.dev.yml \
+  docker compose build pilot prism
+docker compose up -d --force-recreate --no-deps pilot prism
+```
+
+If you forget the source step, the build fails with:
+
+```
+ERROR: TMDB_API_KEY is empty. Refusing to bake a keyless binary.
+Set PILOT_TMDB_API_KEY in your shell before rebuilding.
+```
+
+Verify the new binary picked up the key:
+
+```bash
+docker logs pilot | grep "TMDB metadata client"
+# expect: source=default  (key came from build-time bake-in)
+```
 
 ---
 
