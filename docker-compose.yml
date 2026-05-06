@@ -117,11 +117,15 @@ services:
     environment:
       <<: *app-env
       PULSE_LOG_LEVEL: ${LOG_LEVEL:-info}
-      # OPT-IN: Docker socket access for per-container CPU / memory /
-      # network / IO on the dashboard. Disabled by default because the
-      # socket effectively grants root on the host on most Docker builds,
-      # even when mounted read-only. To enable: uncomment BOTH the env
-      # var below AND the docker.sock volume mount further down.
+      # OPT-IN: Docker socket access for (1) per-container CPU / memory /
+      # network / IO on the dashboard, and (2) the in-app
+      # /api/v1/system/logs/docker endpoint that serves container stdout
+      # with much more history than the in-memory ring buffer. Disabled
+      # by default because the socket effectively grants root on the
+      # host on most Docker builds, even when mounted read-only. To
+      # enable for the dashboard: uncomment the env var below AND the
+      # docker.sock volume mount further down. To enable for the log
+      # endpoint only: uncomment just the mount.
       # PULSE_DASHBOARD_DOCKER_SOCKET: /var/run/docker.sock
       # OPT-IN: FlareSolverr — used by Pulse's torznab scraper to bypass
       # Cloudflare challenges on indexers like 1337x and kickasstorrents
@@ -132,7 +136,10 @@ services:
     volumes:
       - beacon-secrets:/run/secrets:ro
       - ${PULSE_CONFIG_PATH:-./config/pulse}:/config
-      # OPT-IN: uncomment together with PULSE_DASHBOARD_DOCKER_SOCKET above.
+      # OPT-IN: enables the dashboard docker stats (when paired with
+      # PULSE_DASHBOARD_DOCKER_SOCKET above) AND the
+      # /api/v1/system/logs/docker endpoint (full-history container
+      # stdout for the in-app Logs page). See env-var note above.
       # - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - beacon-net
@@ -160,6 +167,13 @@ services:
       - ${PILOT_CONFIG_PATH:-./config/pilot}:/config
       - ${TV_PATH:-/path/to/tv}:/tv
       - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
+      # OPT-IN: enables /api/v1/system/logs/docker — Settings → System
+      # → Logs in the UI then offers the "Docker stdout (full history)"
+      # source. Without this mount the Logs page falls back to the
+      # in-memory ring buffer (~1000 entries). Disabled by default
+      # because the socket effectively grants root on the host on most
+      # Docker builds, even when mounted read-only.
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - beacon-net
     ports:
@@ -186,6 +200,11 @@ services:
       - ${PRISM_CONFIG_PATH:-./config/prism}:/config
       - ${MOVIES_PATH:-/path/to/movies}:/movies
       - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
+      # OPT-IN: enables /api/v1/system/logs/docker — Settings → System
+      # → Logs in the UI then offers the "Docker stdout (full history)"
+      # source. Without this mount the Logs page falls back to the
+      # in-memory ring buffer. Same root-on-host caveat as Pulse above.
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - beacon-net
     ports:
@@ -227,6 +246,11 @@ services:
       # the operator hasn't opted in (mounting /dev/null over /dev/null
       # is harmless).
       - ${WATCH_PATH:-/dev/null}:${HAUL_TORRENT_WATCH_DIR:-/dev/null}
+      # OPT-IN: enables /api/v1/system/logs/docker — System → Logs in
+      # the UI then offers the "Docker stdout (full history)" source.
+      # Without this mount the Logs page falls back to the in-memory
+      # ring buffer. Same root-on-host caveat as Pulse above.
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - beacon-net
     ports:
