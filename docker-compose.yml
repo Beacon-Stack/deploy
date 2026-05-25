@@ -2,27 +2,23 @@
 # Beacon Stack — self-hosted media management
 # https://beaconstack.io
 #
-# First run:
-#   1. cp .env.example .env
-#   2. Edit .env — at minimum set TV_PATH, MOVIES_PATH, DOWNLOADS_PATH to point
-#      at your storage. (Same filesystem, see note below.)
-#   3. docker compose up -d
+# Quickstart:
+#   1. Edit the three media paths below to point at your storage. (Same
+#      filesystem — see note.)
+#   2. docker compose up -d
 #
 # Web UIs:  Pulse :9696 · Pilot :8383 · Prism :8282 · Haul :8484
 #
-# IMPORTANT: TV_PATH, MOVIES_PATH, and DOWNLOADS_PATH must sit on the SAME
-# filesystem. Imports use hardlinks + atomic moves; on different filesystems
-# the stack falls back to copies (slow, wastes disk). Easiest layout:
-# everything under one root, e.g. /opt/media/{tv,movies,downloads}.
+# IMPORTANT: TV, MOVIES, and DOWNLOADS must sit on the SAME filesystem.
+# Imports use hardlinks + atomic moves; on different filesystems the stack
+# falls back to copies (slow, wastes disk). Easiest layout: everything
+# under one root, e.g. /opt/media/{tv,movies,downloads}.
 #
-# Optional:
-#   - VPN tunnel for Haul:        see docker-compose.vpn.yml
-#   - FlareSolverr (Cloudflare):  COMPOSE_PROFILES=flaresolverr in .env
+# This file is meant to be EDITED IN PLACE. There is no .env and no
+# override file - every value you might want to change lives below.
 # ============================================================================
 
-# YAML anchors below cut ~50 lines of boilerplate. Each &name defines a
-# reusable block; <<: *name merges it into a service. Edit once, applies
-# everywhere.
+# ─── Shared YAML anchors ────────────────────────────────────────────────────
 
 x-logging: &default-logging
   driver: json-file
@@ -36,10 +32,8 @@ x-healthcheck: &healthcheck-base
   retries: 5
   start_period: 20s
 
-# Shared env for all four Beacon services. Per-service env (DB DSN, ports)
-# is added in each service block.
 x-app-env: &app-env
-  TZ: ${TZ:-UTC}
+  TZ: UTC                # optional: change to your IANA timezone
 
 networks:
   beacon-net:
@@ -48,75 +42,15 @@ networks:
       config:
         - subnet: 172.28.0.0/16
 
-volumes:
-  pgdata:
-  beacon-secrets:
-
 services:
-
-  # One-shot sidecar — generates random DB passwords on first run.
-  # Idempotent: skips files that already exist on subsequent runs.
-  init-secrets:
-    image: alpine:3.21
-    container_name: init-secrets
-    restart: "no"
-    volumes:
-      - beacon-secrets:/secrets
-      - ./scripts:/scripts:ro
-    command: ["/scripts/init-secrets.sh"]
-    logging: *default-logging
-
-  postgres:
-    image: postgres:17-alpine
-    container_name: postgres
-    restart: unless-stopped
-    depends_on:
-      init-secrets:
-        condition: service_completed_successfully
-    environment:
-      POSTGRES_PASSWORD_FILE: /run/secrets/pg.txt
-      TZ: ${TZ:-UTC}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - beacon-secrets:/run/secrets:ro
-    networks:
-      - beacon-net
-    healthcheck:
-      <<: *healthcheck-base
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      start_period: 30s
-    logging: *default-logging
-
-  # One-shot sidecar — creates per-service DB users + databases after
-  # Postgres is healthy. Idempotent; does nothing on subsequent runs.
-  init-databases:
-    image: postgres:17-alpine
-    container_name: init-databases
-    restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - beacon-secrets:/run/secrets:ro
-      - ./scripts:/scripts:ro
-    command: ["/scripts/init-databases.sh"]
-    networks:
-      - beacon-net
-    logging: *default-logging
 
   pulse:
     image: ghcr.io/beacon-stack/pulse:latest
     container_name: pulse
     restart: unless-stopped
-    depends_on:
-      init-databases:
-        condition: service_completed_successfully
-    # Most env (DSN, secret-file paths, Pulse URL) is baked into the image.
-    # Only the operator-facing knobs live here.
     environment:
       <<: *app-env
-      PULSE_LOG_LEVEL: ${LOG_LEVEL:-info}
+      PULSE_LOG_LEVEL: info
       # OPT-IN: Docker socket access for (1) per-container CPU / memory /
       # network / IO on the dashboard, and (2) the in-app
       # /api/v1/system/logs/docker endpoint that serves container stdout
@@ -127,15 +61,14 @@ services:
       # docker.sock volume mount further down. To enable for the log
       # endpoint only: uncomment just the mount.
       # PULSE_DASHBOARD_DOCKER_SOCKET: /var/run/docker.sock
-      # OPT-IN: FlareSolverr — used by Pulse's torznab scraper to bypass
+      # OPT-IN: FlareSolverr - used by Pulse's torznab scraper to bypass
       # Cloudflare challenges on indexers like 1337x and kickasstorrents
-      # that otherwise return HTTP 403. Disabled by default. To enable,
-      # uncomment the line below and add COMPOSE_PROFILES=flaresolverr
-      # to your .env (which also starts the flaresolverr container).
-      # PULSE_FLARESOLVERR_URL: ${PULSE_FLARESOLVERR_URL:-http://flaresolverr:8191}
+      # that otherwise return HTTP 403. To enable, uncomment the line
+      # below and start the flaresolverr service profile:
+      #   docker compose --profile flaresolverr up -d
+      # PULSE_FLARESOLVERR_URL: http://flaresolverr:8191
     volumes:
-      - beacon-secrets:/run/secrets:ro
-      - ${PULSE_CONFIG_PATH:-./config/pulse}:/config
+      - ./config/pulse:/config
       # OPT-IN: enables the dashboard docker stats (when paired with
       # PULSE_DASHBOARD_DOCKER_SOCKET above) AND the
       # /api/v1/system/logs/docker endpoint (full-history container
@@ -144,7 +77,7 @@ services:
     networks:
       - beacon-net
     ports:
-      - "${PULSE_PORT:-9696}:9696"
+      - "9696:9696"
     healthcheck:
       <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9696/health"]
@@ -155,18 +88,15 @@ services:
     container_name: pilot
     restart: unless-stopped
     depends_on:
-      init-databases:
-        condition: service_completed_successfully
       pulse:
         condition: service_healthy
     environment:
       <<: *app-env
-      PILOT_LOG_LEVEL: ${LOG_LEVEL:-info}
+      PILOT_LOG_LEVEL: info
     volumes:
-      - beacon-secrets:/run/secrets:ro
-      - ${PILOT_CONFIG_PATH:-./config/pilot}:/config
-      - ${TV_PATH:-/path/to/tv}:/tv
-      - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
+      - ./config/pilot:/config
+      - /opt/media/tv:/tv                  # ← EDIT: your TV directory
+      - /opt/media/downloads:/downloads    # ← EDIT: your downloads directory
       # OPT-IN: enables /api/v1/system/logs/docker — Settings → System
       # → Logs in the UI then offers the "Docker stdout (full history)"
       # source. Without this mount the Logs page falls back to the
@@ -177,7 +107,7 @@ services:
     networks:
       - beacon-net
     ports:
-      - "${PILOT_PORT:-8383}:8383"
+      - "8383:8383"
     healthcheck:
       <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8383/health"]
@@ -188,18 +118,15 @@ services:
     container_name: prism
     restart: unless-stopped
     depends_on:
-      init-databases:
-        condition: service_completed_successfully
       pulse:
         condition: service_healthy
     environment:
       <<: *app-env
-      PRISM_LOG_LEVEL: ${LOG_LEVEL:-info}
+      PRISM_LOG_LEVEL: info
     volumes:
-      - beacon-secrets:/run/secrets:ro
-      - ${PRISM_CONFIG_PATH:-./config/prism}:/config
-      - ${MOVIES_PATH:-/path/to/movies}:/movies
-      - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
+      - ./config/prism:/config
+      - /opt/media/movies:/movies          # ← EDIT: your movies directory
+      - /opt/media/downloads:/downloads    # ← EDIT: same path as pilot
       # OPT-IN: enables /api/v1/system/logs/docker — Settings → System
       # → Logs in the UI then offers the "Docker stdout (full history)"
       # source. Without this mount the Logs page falls back to the
@@ -208,7 +135,7 @@ services:
     networks:
       - beacon-net
     ports:
-      - "${PRISM_PORT:-8282}:8282"
+      - "8282:8282"
     healthcheck:
       <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8282/health"]
@@ -218,51 +145,46 @@ services:
     image: ghcr.io/beacon-stack/haul:latest
     container_name: haul
     restart: unless-stopped
-    depends_on:
-      init-databases:
-        condition: service_completed_successfully
     environment:
       <<: *app-env
-      HAUL_LOG_LEVEL: ${LOG_LEVEL:-info}
+      HAUL_LOG_LEVEL: info
       # Admin diagnostics tab (Settings → System → Diagnostics). Off by
-      # default; flip to "true" in .env when you need to inspect/clean
-      # orphan DB rows. See haul/internal/db/admin/ for the diagnostic
-      # registry.
-      HAUL_ADMIN_DIAGNOSTICS_ENABLED: ${HAUL_ADMIN_DIAGNOSTICS_ENABLED:-false}
-      HAUL_CLEANUP_RETENTION_DAYS: ${HAUL_CLEANUP_RETENTION_DAYS:-30}
-      # Watched folder for auto-adding .torrent files. Empty disables.
-      # Mount the host path you want haul to watch into the container
-      # via WATCH_PATH in .env (e.g. WATCH_PATH=/data/torrent-inbox →
-      # set HAUL_TORRENT_WATCH_DIR=/torrents-watch and add the bind
-      # mount below).
-      HAUL_TORRENT_WATCH_DIR: ${HAUL_TORRENT_WATCH_DIR:-}
+      # default; flip to "true" when you need to inspect/clean orphan DB
+      # rows. See haul/internal/db/admin/ for the diagnostic registry.
+      HAUL_ADMIN_DIAGNOSTICS_ENABLED: "false"
+      HAUL_CLEANUP_RETENTION_DAYS: "30"
+      # Watched folder for auto-adding .torrent files. Empty = disabled.
+      # To enable: set this to the in-container path, AND add the matching
+      # bind mount below.
+      HAUL_TORRENT_WATCH_DIR: ""
     volumes:
-      - beacon-secrets:/run/secrets:ro
-      - ${HAUL_CONFIG_PATH:-./config/haul}:/config
-      - ${DOWNLOADS_PATH:-/path/to/downloads}:/downloads
-      # When HAUL_TORRENT_WATCH_DIR is set, also bind-mount the host
-      # watch directory at the same path inside the container. The
-      # default ${WATCH_PATH:-/dev/null} sentinel keeps this no-op when
-      # the operator hasn't opted in (mounting /dev/null over /dev/null
-      # is harmless).
-      - ${WATCH_PATH:-/dev/null}:${HAUL_TORRENT_WATCH_DIR:-/dev/null}
-      # OPT-IN: enables /api/v1/system/logs/docker — System → Logs in
-      # the UI then offers the "Docker stdout (full history)" source.
-      # Without this mount the Logs page falls back to the in-memory
-      # ring buffer. Same root-on-host caveat as Pulse above.
+      - ./config/haul:/config
+      - /opt/media/downloads:/downloads    # ← EDIT: same path as pilot/prism
+      # OPT-IN watch folder: when HAUL_TORRENT_WATCH_DIR is set above,
+      # uncomment and edit the host path on the left to point at the
+      # directory you'll drop .torrent files into.
+      # - /host/path/to/inbox:/torrents-watch
+      # OPT-IN: enables /api/v1/system/logs/docker — Settings → System
+      # → Logs in the UI then offers the "Docker stdout (full history)"
+      # source. Without this mount the Logs page falls back to the
+      # in-memory ring buffer. Same root-on-host caveat as Pulse above.
       # - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - beacon-net
     ports:
-      - "${HAUL_PORT:-8484}:8484"
-      - "${HAUL_TORRENT_PORT:-6881}:6881/tcp"
-      - "${HAUL_TORRENT_PORT:-6881}:6881/udp"
+      - "8484:8484"
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
     healthcheck:
       <<: *healthcheck-base
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8484/health"]
       start_period: 30s
     logging: *default-logging
 
+  # FlareSolverr - opt-in via compose profile. Handles Cloudflare-protected
+  # indexers (1337x, kickasstorrents, etc.) that otherwise return HTTP 403.
+  #   docker compose --profile flaresolverr up -d
+  # Then uncomment PULSE_FLARESOLVERR_URL in the pulse service above.
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
@@ -270,10 +192,94 @@ services:
     profiles:
       - flaresolverr
     environment:
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      TZ: ${TZ:-UTC}
+      LOG_LEVEL: info
+      TZ: UTC
     networks:
       - beacon-net
     ports:
-      - "${FLARESOLVERR_PORT:-8191}:8191"
+      - "8191:8191"
     logging: *default-logging
+
+# ============================================================================
+# OPT-IN: VPN tunnel for Haul
+# ============================================================================
+# Uncomment the `vpn:` block and the `haul:` override below to route all
+# torrent traffic through a Gluetun VPN tunnel. Other services stay on the
+# bridge network. Requires Docker Compose v2.20+ (Dec 2023) for `!reset`.
+#
+# Provider defaults: PIA / OpenVPN / Netherlands. Gluetun supports 30+
+# providers - see https://github.com/qdm12/gluetun-wiki for knobs.
+# ----------------------------------------------------------------------------
+#
+# services:
+#
+#   vpn:
+#     image: qmcgaw/gluetun:latest
+#     container_name: vpn
+#     restart: unless-stopped
+#     cap_add:
+#       - NET_ADMIN
+#     devices:
+#       - /dev/net/tun:/dev/net/tun
+#     environment:
+#       VPN_SERVICE_PROVIDER: "private internet access"
+#       VPN_TYPE: openvpn                             # or wireguard
+#       OPENVPN_USER: "YOUR_VPN_USERNAME"             # ← EDIT
+#       OPENVPN_PASSWORD: "YOUR_VPN_PASSWORD"         # ← EDIT
+#       # WireGuard auth - uncomment and set VPN_TYPE=wireguard above.
+#       # WIREGUARD_PRIVATE_KEY: ""
+#       # WIREGUARD_ADDRESSES: ""
+#       SERVER_REGIONS: "Netherlands"
+#       VPN_PORT_FORWARDING: "on"
+#       # Maps the dynamic VPN-forwarded port → Haul's listen port (6881)
+#       # via iptables DNAT. Without this, forwarded peers hit Gluetun
+#       # and never reach Haul.
+#       VPN_PORT_FORWARDING_LISTENING_PORT: "6881"
+#       FIREWALL_VPN_INPUT_PORTS: "6881"
+#       FIREWALL_INPUT_PORTS: "8484"
+#       FIREWALL_OUTBOUND_SUBNETS: "172.28.0.0/16"
+#       HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+#       HTTP_CONTROL_SERVER_LOG: "off"
+#       TZ: UTC
+#     networks:
+#       - beacon-net
+#     ports:
+#       # Haul shares this container's network namespace; its ports are
+#       # published here instead of on the haul service.
+#       - "8484:8484"
+#       - "6881:6881/tcp"
+#       - "6881:6881/udp"
+#     volumes:
+#       - ./config/gluetun:/gluetun
+#     configs:
+#       - source: gluetun-auth
+#         target: /gluetun/auth/config.toml
+#     logging: *default-logging
+#
+#   # Add PULSE_DASHBOARD_GLUETUN_URL to the pulse: environment block above
+#   # so the dashboard VPN panel populates.
+#
+#   # Reroute Haul through the VPN namespace. `!reset` clears the base
+#   # service's ports + networks (mutually exclusive with network_mode).
+#   haul:
+#     network_mode: service:vpn
+#     ports: !reset []
+#     networks: !reset []
+#     depends_on:
+#       vpn:
+#         condition: service_healthy
+#
+# configs:
+#   gluetun-auth:
+#     content: |
+#       [[roles]]
+#       name = "pulse-dashboard"
+#       routes = [
+#           "GET /v1/version",
+#           "GET /v1/publicip/ip",
+#           "GET /v1/openvpn/portforwarded",
+#           "GET /v1/openvpn/settings",
+#           "GET /v1/dns/status",
+#           "GET /v1/openvpn/status",
+#       ]
+#       auth = "none"

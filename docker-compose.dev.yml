@@ -6,9 +6,10 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 #
-# Or set COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml in .env and
-# plain `docker compose up -d` will apply both files automatically. See
-# .env.dev.example for a ready-made starting point.
+# For the keyless-build guard on Pilot/Prism (see comment on the pilot
+# service below), export TMDB / Trakt credentials in your shell before
+# building - the Dockerfile aborts on empty keys rather than silently
+# baking a 503-on-lookup binary.
 #
 # The 'image:' lines keep the same ghcr.io tags so you can rebuild with
 # `docker compose build`, reuse the last build with `docker compose up`,
