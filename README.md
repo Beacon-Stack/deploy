@@ -1,6 +1,6 @@
 # Beacon Stack — Deploy
 
-Docker Compose deployment for the full Beacon media management stack. One file, four services, three lines to edit.
+Docker Compose deployment for the full Beacon media management stack. One file, four services, one settings block to edit.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker required](https://img.shields.io/badge/Docker-24%2B-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/get-docker/)
@@ -52,19 +52,24 @@ git clone https://github.com/beacon-stack/deploy.git
 cd deploy
 ```
 
-### 2. Edit your media paths
+### 2. Edit the settings block
 
-Open `docker-compose.yml` and edit the three `← EDIT` lines to point at real directories on your host:
+Open `docker-compose.yml`. The `x-settings` block at the top is the only part you need to touch:
 
 ```yaml
-- /opt/media/tv:/tv                  # ← EDIT: your TV directory
-- /opt/media/movies:/movies          # ← EDIT: your movies directory
-- /opt/media/downloads:/downloads    # ← EDIT: your downloads directory
+x-settings:
+  tv:        &tv        /opt/media/tv:/tv                 # your TV directory
+  movies:    &movies    /opt/media/movies:/movies         # your movies directory
+  downloads: &downloads /opt/media/downloads:/downloads   # your downloads directory
+  api-key:   &api-key   change-me-to-a-long-random-string # any long random string
+  timezone:  &timezone  UTC                               # e.g. America/New_York
 ```
+
+Change the part *left* of each colon to a real directory on your host, and replace the API key with something random (`openssl rand -hex 32` works). The `&name` markers are YAML anchors — leave them alone; they're how the value is reused further down the file.
 
 > **Same filesystem rule.** All three host paths must live on the same filesystem. Beacon uses hardlinks + atomic moves for imports — across filesystems it falls back to slow file copies that double your disk usage. The simplest layout is one root with three subdirs (e.g. `/opt/media/{tv,movies,downloads}`).
 
-That's the only required edit. Every other knob in `docker-compose.yml` has a sensible default with a comment explaining what it does.
+That's the only required edit. Everything else in the file is plain, per-service Compose config you can read top to bottom.
 
 ### 3. Start
 
@@ -85,7 +90,7 @@ Everything should show `healthy`:
 - Prism → [http://localhost:8282](http://localhost:8282)
 - Haul → [http://localhost:8484](http://localhost:8484)
 
-Each service generates its own API key on first run and stores it in its SQLite DB (`./config/<app>/<app>.db`). The key is surfaced in the UI under **Settings → General** with a **Regenerate** button — the same pattern Sonarr and Radarr use. External tools (Homepage, Home Assistant, Radarr v3 clients) read it from there.
+Pulse and Haul use the shared `api-key` from the settings block. Pilot and Prism generate their own on first run and store it in their SQLite DB (`./config/<app>/<app>.db`). Every key is visible in the UI under **Settings → General** with a **Regenerate** button — the same pattern Sonarr and Radarr use. External tools (Homepage, Home Assistant, Radarr v3 clients) read it from there.
 
 ---
 
@@ -102,7 +107,7 @@ Each service generates its own API key on first run and stores it in its SQLite 
 
 ## Connecting the apps
 
-Most of the wiring is automatic. On startup, Pilot, Prism, and Haul each register themselves with Pulse using auto-discovered API keys; you do **not** need to copy keys between UIs or add Haul as a download client by hand.
+Most of the wiring is automatic. On startup, Pilot, Prism, and Haul each register themselves with Pulse using the shared `api-key` from the settings block; you do **not** need to copy keys between UIs or add Haul as a download client by hand.
 
 What flows automatically from Pulse to Pilot and Prism:
 
@@ -113,17 +118,17 @@ What flows automatically from Pulse to Pilot and Prism:
 
 The one thing you'll typically do in Pulse's UI on first run is open the Indexers page and add your Torznab/Newznab providers. Everything else is wired by the registration handshake.
 
-> **VPN override note.** When the VPN block is enabled, Haul shares Gluetun's network namespace and other services reach it as `vpn:8484` instead of `haul:8484`. Haul advertises this hostname during registration, so the auto-registered download-client entry resolves correctly without manual edits.
+> **VPN note.** When the VPN add-on is enabled, Haul shares Gluetun's network namespace and other services reach it as `vpn:8484` instead of `haul:8484`. Haul advertises this hostname during registration, so the auto-registered download-client entry resolves correctly without manual edits.
 
 ---
 
 ## Configuration
 
-`docker-compose.yml` is meant to be **edited in place**. There is no `.env` file and no override file. Every value worth changing lives in the compose file with a comment.
+`docker-compose.yml` is meant to be **edited in place**. There is no required `.env` file. Optional features (VPN, FlareSolverr) are separate add-on files you layer on with `-f`.
 
 ### Media paths
 
-The three paths set in [Quick start](#quick-start) are the most important values. If you run on a NAS or split storage, edit the bind mounts on the host side (left of the colon). Remember the [same-filesystem rule](#2-edit-your-media-paths).
+The three paths in the settings block are the most important values. If you run on a NAS or split storage, edit the host side (left of the colon). Remember the [same-filesystem rule](#2-edit-the-settings-block).
 
 ### Ports
 
@@ -140,13 +145,30 @@ volumes:
 
 ### Timezone
 
-Default `TZ: UTC` lives in the `x-app-env` YAML anchor near the top of the compose file. Change to any [IANA timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — applies to log timestamps and scheduled tasks across all services.
+`timezone` in the settings block. Change to any [IANA timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — applies to log timestamps and scheduled tasks across all services.
 
 ### API keys
 
-Each service generates its API key on first run and persists it to its SQLite DB. The UI exposes it under **Settings → General** with a **Regenerate** button. No init sidecar, no `/run/secrets/*` files, no manual rotation steps — same model as Sonarr/Radarr.
+`api-key` in the settings block is used as Pulse's and Haul's API key, and as the credential Pilot, Prism, and Haul present to Pulse when they register. Pilot and Prism generate their own keys on first run. Every key is shown under **Settings → General** in each UI. No init sidecar, no `/run/secrets/*` files — same model as Sonarr/Radarr.
 
-Service-to-service auth happens via Pulse's registration handshake on the private bridge network; you don't need to copy keys between UIs.
+To rotate the shared key, change it in the settings block and `docker compose up -d`.
+
+### Docker socket (optional)
+
+Pulse can show per-container CPU/memory on its dashboard and serve full container logs if it can read the Docker socket. This is off by default because the socket effectively grants root on the host. To enable, add to the `pulse` service:
+
+```yaml
+    environment:
+      PULSE_DASHBOARD_DOCKER_SOCKET: /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    group_add:
+      - "999"   # your host's docker group GID: getent group docker
+```
+
+### Watch folder for .torrent files (optional)
+
+Add `HAUL_TORRENT_WATCH_DIR: /torrents-watch` to Haul's environment and bind-mount a host directory at `/torrents-watch`. Haul auto-adds any `.torrent` dropped there.
 
 ---
 
@@ -154,16 +176,19 @@ Service-to-service auth happens via Pulse's registration handshake on the privat
 
 VPN is off by default. To route Haul's torrent traffic through [Gluetun](https://github.com/qdm12/gluetun):
 
-1. Open `docker-compose.yml`, scroll to the bottom section labelled **OPT-IN: VPN tunnel for Haul**.
-2. **Uncomment the entire `services:` block and the `configs:` block** at the bottom (each line starts with `# `). In most editors, select the block and use a "remove leading `# `" macro.
-3. Edit `OPENVPN_USER` and `OPENVPN_PASSWORD` with your provider credentials.
-4. `docker compose up -d`.
+1. Open `docker-compose.vpn.yml` and fill in the `← EDIT` lines (provider, username, password, region).
+2. Start the stack with both files:
 
-Defaults: PIA / OpenVPN / Netherlands. Gluetun supports [30+ providers](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers) — change `VPN_SERVICE_PROVIDER`, `VPN_TYPE`, and `SERVER_REGIONS` to match.
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
+   ```
 
-For WireGuard, set `VPN_TYPE=wireguard`, uncomment `WIREGUARD_PRIVATE_KEY` / `WIREGUARD_ADDRESSES`, and fill them in.
+Defaults: PIA / OpenVPN / Netherlands. Gluetun supports [30+ providers](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers) — change `VPN_SERVICE_PROVIDER`, `VPN_TYPE`, and `SERVER_REGIONS` to match. For WireGuard, set `VPN_TYPE: wireguard` and add `WIREGUARD_PRIVATE_KEY` / `WIREGUARD_ADDRESSES` per the Gluetun wiki.
 
-**To disable** the VPN later: re-comment the block (or just delete it) and `docker compose up -d`. Haul reattaches directly to `beacon-net` on its next start.
+> **Tip:** to stop typing `-f` every time, create a file named `.env` next to the compose file containing
+> `COMPOSE_FILE=docker-compose.yml:docker-compose.vpn.yml` — plain `docker compose up -d` then loads both.
+
+**To disable** the VPN later: run `docker compose up -d` with only the base file (and `docker compose rm -sf vpn`). Haul reattaches to the normal network on its next start.
 
 ---
 
@@ -172,10 +197,10 @@ For WireGuard, set `VPN_TYPE=wireguard`, uncomment `WIREGUARD_PRIVATE_KEY` / `WI
 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a Cloudflare challenge solver for indexers behind Cloudflare bot protection. Most users don't need it.
 
 ```bash
-docker compose --profile flaresolverr up -d
+docker compose -f docker-compose.yml -f docker-compose.flaresolverr.yml up -d
 ```
 
-Then uncomment the `PULSE_FLARESOLVERR_URL` line in the `pulse` service block. Pulse picks it up on next restart and uses it transparently for indexers that return Cloudflare challenges.
+That's it — the add-on file also points Pulse at FlareSolverr, which it uses transparently for indexers that return Cloudflare challenges. Combine with the VPN by passing all three `-f` files.
 
 ---
 
@@ -212,7 +237,7 @@ If you're on a pre-SQLite Beacon Stack (one that ran a `postgres` container and 
 3. Run `pg2sqlite` against the still-up Postgres. It copies every row, table by table, with the right type coercion (`TIMESTAMPTZ`→RFC3339 TEXT, `JSONB`→TEXT, `BYTEA`→BLOB, `BOOLEAN`→0/1) and bumps the SQLite `sqlite_sequence` high-water marks so subsequent inserts continue past the imported IDs.
 
    ```bash
-   docker run --rm --network deploy_beacon-net \
+   docker run --rm --network deploy_default \
      -v "$PWD/config/pulse:/sqlite/pulse" \
      -v "$PWD/config/pilot:/sqlite/pilot" \
      -v "$PWD/config/prism:/sqlite/prism" \
@@ -297,17 +322,20 @@ docker logs pilot | grep "TMDB metadata client"
 **Pilot or Prism never auto-registered Haul as a download client**
 - Haul has to register with Pulse first (look for `pulse: auto-registered download-client service` in `docker compose logs pulse`). If Pulse logs show registration but Pilot/Prism still don't see it, force a sync with `docker compose restart pilot prism`.
 
-**VPN won't connect** (when VPN block is enabled)
-- Check `OPENVPN_USER` / `OPENVPN_PASSWORD` in the VPN section.
+**VPN won't connect** (when the VPN add-on is enabled)
+- Check `OPENVPN_USER` / `OPENVPN_PASSWORD` in `docker-compose.vpn.yml`.
 - Confirm the provider name matches Gluetun's expected value — see the [Gluetun wiki](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers).
 - `docker compose logs vpn`
 
-**`!reset` causing errors when enabling the VPN block**
-- You're on Docker Compose < 2.20. Run `docker compose version` to check, then upgrade — `!reset` was added in Dec 2023 and is required for the VPN override to work correctly.
+**`!reset` causing errors when enabling the VPN add-on**
+- You're on Docker Compose < 2.20. Run `docker compose version` to check, then upgrade — `!reset` was added in Dec 2023 and is required for the VPN add-on to work correctly.
 
-**Haul can't reach Pulse** (VPN block enabled)
-- Haul shares Gluetun's network namespace. Gluetun is attached to `beacon-net` and its firewall allow-lists the bridge subnet via `FIREWALL_OUTBOUND_SUBNETS=172.28.0.0/16`.
-- If you changed the `beacon-net` subnet, update `FIREWALL_OUTBOUND_SUBNETS` in the VPN block to match.
+**Haul can't reach Pulse** (VPN add-on enabled)
+- Haul shares Gluetun's network namespace. Gluetun's firewall allow-lists the compose network via `FIREWALL_OUTBOUND_SUBNETS=172.28.0.0/16`, and the add-on pins the network to that subnet.
+- If `172.28.0.0/16` collides with something on your LAN, change both the `subnet` and `FIREWALL_OUTBOUND_SUBNETS` in `docker-compose.vpn.yml` to match, then `docker compose down && docker compose up -d`.
+
+**Every indexer search fails right after a reboot** (`expected element type <rss> but have <error>`)
+- Docker copies the host's DNS resolvers when a container is *created*. If the stack came up before the host had working DNS, containers have no upstream resolver until recreated: `docker compose up -d --force-recreate`. To make it permanent, add `dns: [1.1.1.1]` (or your LAN resolver) to each service.
 
 **Port conflicts**
 - If another host service uses 9696, 8383, 8282, or 8484, change the corresponding host port (left of the colon) in the relevant `ports:` block.

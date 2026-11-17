@@ -277,9 +277,40 @@ func pgColumns(ctx context.Context, db *sql.DB, table string) ([]columnInfo, err
 	return out, rows.Err()
 }
 
+// sqliteColumns returns the column names of the named table in the SQLite
+// database. Used to filter out PG columns that don't exist in the target
+// schema (e.g. when a Postgres migration didn't make it into the squashed
+// SQLite baseline).
+func sqliteColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info("%s")`, table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
+}
+
 // copyTable reads all rows from `table` in src and inserts them into the
 // same-named table in dst, applying type coercion per column. Returns the
 // number of rows copied and the row count reported by the source.
+//
+// PG columns absent from the SQLite schema are skipped (with a stderr
+// warning) - this happens when a Postgres migration didn't make it into
+// the squashed SQLite baseline. Existing rows in the SQLite target are
+// DELETEd first so service-boot-inserted rows (singleton CHECK(id=1)
+// tables, EnsureAPIKey-generated config_entries) don't trip UNIQUE
+// constraints when the PG copy lands.
 func copyTable(ctx context.Context, src, dst *sql.DB, table string) (copied, srcRows int64, err error) {
 	cols, err := pgColumns(ctx, src, table)
 	if err != nil {
@@ -294,6 +325,24 @@ func copyTable(ctx context.Context, src, dst *sql.DB, table string) (copied, src
 	}
 	if srcRows == 0 {
 		return 0, 0, nil
+	}
+
+	// Filter PG columns to those that exist in the SQLite schema.
+	sqliteCols, err := sqliteColumns(ctx, dst, table)
+	if err != nil {
+		return 0, 0, fmt.Errorf("introspecting sqlite columns: %w", err)
+	}
+	filteredCols := make([]columnInfo, 0, len(cols))
+	for _, c := range cols {
+		if sqliteCols[c.name] {
+			filteredCols = append(filteredCols, c)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ! %s.%s: in postgres but not in sqlite schema - column data dropped\n", table, c.name)
+		}
+	}
+	cols = filteredCols
+	if len(cols) == 0 {
+		return 0, srcRows, fmt.Errorf("no overlapping columns between pg and sqlite")
 	}
 
 	colNames := make([]string, len(cols))
@@ -327,6 +376,13 @@ func copyTable(ctx context.Context, src, dst *sql.DB, table string) (copied, src
 			_ = tx.Rollback()
 		}
 	}()
+
+	// Clear any pre-existing rows in the target table so service-boot-inserted
+	// rows (singleton CHECK(id=1) tables, EnsureAPIKey-generated config_entries)
+	// don't collide with the PG copy on UNIQUE constraints.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM "%s"`, table)); err != nil {
+		return 0, srcRows, fmt.Errorf("clear target: %w", err)
+	}
 
 	stmt, err := tx.PrepareContext(ctx, insertQ)
 	if err != nil {

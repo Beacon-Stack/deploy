@@ -1,0 +1,86 @@
+# Add-on: route Haul's torrent traffic through a VPN (Gluetun).
+#
+#   1. Fill in your VPN provider and credentials below.
+#   2. docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
+#
+# Gluetun supports 30+ providers; see
+# https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers for the
+# exact VPN_SERVICE_PROVIDER / SERVER_REGIONS values and WireGuard options.
+# Requires Docker Compose v2.20+ (for `!reset`).
+
+services:
+
+  vpn:
+    image: qmcgaw/gluetun:latest
+    container_name: vpn
+    hostname: vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: "private internet access"   # ← EDIT
+      VPN_TYPE: openvpn
+      OPENVPN_USER: "YOUR_VPN_USERNAME"                  # ← EDIT
+      OPENVPN_PASSWORD: "YOUR_VPN_PASSWORD"              # ← EDIT
+      SERVER_REGIONS: "Netherlands"                      # ← EDIT (optional)
+      # Ask the provider for a forwarded port and hand it to Haul (6881).
+      # Set to "off" if your provider doesn't support port forwarding.
+      VPN_PORT_FORWARDING: "on"
+      VPN_PORT_FORWARDING_LISTENING_PORTS: "6881"
+      # Leave these alone: they let Haul talk to Pulse and reach the web UI.
+      FIREWALL_VPN_INPUT_PORTS: "6881"
+      FIREWALL_INPUT_PORTS: "8484"
+      FIREWALL_OUTBOUND_SUBNETS: "172.28.0.0/16"
+      HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+      HTTP_CONTROL_SERVER_LOG: "off"
+      # Refresh the provider server list daily. Providers retire server IPs;
+      # with a stale list every connection attempt times out at the TLS handshake.
+      UPDATER_PERIOD: "24h"
+    ports:
+      # Haul's ports are published here because it shares this network.
+      - "8484:8484"
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
+    volumes:
+      - ./config/gluetun:/gluetun
+    configs:
+      - source: gluetun-auth
+        target: /gluetun/auth/config.toml
+
+  haul:
+    network_mode: service:vpn
+    ports: !reset []
+    depends_on:
+      vpn:
+        condition: service_healthy
+
+  pulse:
+    environment:
+      # Lets the Pulse dashboard show VPN status and rotate servers.
+      PULSE_DASHBOARD_GLUETUN_URL: http://vpn:8000
+
+# Fixed subnet so Gluetun's firewall can allow traffic to the other services.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# Read-only access to Gluetun's status API for the Pulse dashboard.
+configs:
+  gluetun-auth:
+    content: |
+      [[roles]]
+      name = "pulse-dashboard"
+      routes = [
+          "GET /v1/version",
+          "GET /v1/publicip/ip",
+          "GET /v1/openvpn/portforwarded",
+          "GET /v1/openvpn/settings",
+          "GET /v1/dns/status",
+          "GET /v1/openvpn/status",
+          "PUT /v1/openvpn/status",
+      ]
+      auth = "none"
