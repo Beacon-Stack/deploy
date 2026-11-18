@@ -3,19 +3,39 @@
 # https://beaconstack.io
 #
 # Quickstart:
-#   1. Edit the three media paths below to point at your storage. (Same
-#      filesystem — see note.)
-#   2. docker compose up -d
+#   1. Save this file anywhere (it doesn't need a git checkout).
+#   2. Set the two paths in SETTINGS below, or put them in a .env file
+#      next to this one:   BEACON_DATA=/srv/media
+#                          BEACON_CONFIG=/opt/beacon
+#   3. docker compose up -d
 #
 # Web UIs:  Pulse :9696 · Pilot :8383 · Prism :8282 · Haul :8484
+# On your own network the UIs open without a login (like Sonarr).
 #
-# IMPORTANT: TV, MOVIES, and DOWNLOADS must sit on the SAME filesystem.
-# Imports use hardlinks + atomic moves; on different filesystems the stack
-# falls back to copies (slow, wastes disk). Easiest layout: everything
-# under one root, e.g. /opt/media/{tv,movies,downloads}.
+# ─── SETTINGS ───────────────────────────────────────────────────────────────
 #
-# This file is meant to be EDITED IN PLACE. There is no .env and no
-# override file - every value you might want to change lives below.
+#   BEACON_DATA    (default /srv/media)   your media + downloads, ONE folder.
+#                  Every app sees it at the same path, /data:
+#
+#                    /data/torrents/tv       <- Haul downloads TV here
+#                    /data/torrents/movies   <- ...and movies here
+#                    /data/media/tv          <- Pilot's library
+#                    /data/media/movies      <- Prism's library
+#
+#                  The folders are created on first start. Because downloads
+#                  and the library are in one mount, imports are instant
+#                  hardlinks instead of copies, and no app needs path
+#                  mappings. (Separate mounts like /tv and /downloads can
+#                  never hardlink, even on the same disk.) Already have a
+#                  library? Point BEACON_DATA at the folder that holds it
+#                  and change the library path in Pilot/Prism.
+#
+#   BEACON_CONFIG  (default /opt/beacon)  app databases and settings, one
+#                  subfolder per app. Put it on a local disk, not a network
+#                  share (SQLite).
+#
+# The apps run as uid/gid 1000. Folders the setup step creates are given to
+# 1000:1000; an existing BEACON_DATA must be writable by uid 1000.
 # ============================================================================
 
 # ─── Shared YAML anchors ────────────────────────────────────────────────────
@@ -44,10 +64,41 @@ networks:
 
 services:
 
+  # One-shot: creates the folder layout above and exits; every app waits
+  # for it. Only folders that don't exist yet are created (and given to
+  # uid 1000), so an existing library's ownership is never changed. It
+  # warns about any folder uid 1000 can't write to.
+  setup:
+    image: alpine:3.21
+    container_name: beacon-setup
+    restart: "no"
+    volumes:
+      - ${BEACON_DATA:-/srv/media}:/data
+      - ${BEACON_CONFIG:-/opt/beacon}:/config
+    command:
+      - sh
+      - -c
+      - |
+        for d in /data/torrents /data/torrents/tv /data/torrents/movies \
+                 /data/media /data/media/tv /data/media/movies \
+                 /config/pulse /config/pilot /config/prism /config/haul; do
+          [ -d "$$d" ] || { mkdir -p "$$d" && chown 1000:1000 "$$d"; }
+          owner=$$(stat -c %u "$$d"); mode=$$(stat -c %a "$$d")
+          if [ "$$owner" != 1000 ] && [ "$${mode#"$${mode%?}"}" -lt 6 ]; then
+            echo "WARNING: $$d is owned by uid $$owner and not writable by uid 1000."
+            echo "         Fix on the host: sudo chown 1000:1000 <that folder>"
+          fi
+        done
+        echo "Beacon folders ready."
+    logging: *default-logging
+
   pulse:
     image: ghcr.io/beacon-stack/pulse:latest
     container_name: pulse
     restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
     environment:
       <<: *app-env
       PULSE_LOG_LEVEL: info
@@ -68,7 +119,7 @@ services:
       #   docker compose --profile flaresolverr up -d
       # PULSE_FLARESOLVERR_URL: http://flaresolverr:8191
     volumes:
-      - ./config/pulse:/config
+      - ${BEACON_CONFIG:-/opt/beacon}/pulse:/config
       # OPT-IN: enables the dashboard docker stats (when paired with
       # PULSE_DASHBOARD_DOCKER_SOCKET above) AND the
       # /api/v1/system/logs/docker endpoint (full-history container
@@ -88,15 +139,16 @@ services:
     container_name: pilot
     restart: unless-stopped
     depends_on:
+      setup:
+        condition: service_completed_successfully
       pulse:
         condition: service_healthy
     environment:
       <<: *app-env
       PILOT_LOG_LEVEL: info
     volumes:
-      - ./config/pilot:/config
-      - /opt/media/tv:/tv                  # ← EDIT: your TV directory
-      - /opt/media/downloads:/downloads    # ← EDIT: your downloads directory
+      - ${BEACON_CONFIG:-/opt/beacon}/pilot:/config
+      - ${BEACON_DATA:-/srv/media}:/data
       # OPT-IN: enables /api/v1/system/logs/docker — Settings → System
       # → Logs in the UI then offers the "Docker stdout (full history)"
       # source. Without this mount the Logs page falls back to the
@@ -118,15 +170,16 @@ services:
     container_name: prism
     restart: unless-stopped
     depends_on:
+      setup:
+        condition: service_completed_successfully
       pulse:
         condition: service_healthy
     environment:
       <<: *app-env
       PRISM_LOG_LEVEL: info
     volumes:
-      - ./config/prism:/config
-      - /opt/media/movies:/movies          # ← EDIT: your movies directory
-      - /opt/media/downloads:/downloads    # ← EDIT: same path as pilot
+      - ${BEACON_CONFIG:-/opt/beacon}/prism:/config
+      - ${BEACON_DATA:-/srv/media}:/data
       # OPT-IN: enables /api/v1/system/logs/docker — Settings → System
       # → Logs in the UI then offers the "Docker stdout (full history)"
       # source. Without this mount the Logs page falls back to the
@@ -145,9 +198,15 @@ services:
     image: ghcr.io/beacon-stack/haul:latest
     container_name: haul
     restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
     environment:
       <<: *app-env
       HAUL_LOG_LEVEL: info
+      # Torrents go to /data/torrents/<category>: Pilot sends "tv",
+      # Prism "movies".
+      HAUL_TORRENT_DOWNLOAD_DIR: /data/torrents
       # Admin diagnostics tab (Settings → System → Diagnostics). Off by
       # default; flip to "true" when you need to inspect/clean orphan DB
       # rows. See haul/internal/db/admin/ for the diagnostic registry.
@@ -158,8 +217,8 @@ services:
       # bind mount below.
       HAUL_TORRENT_WATCH_DIR: ""
     volumes:
-      - ./config/haul:/config
-      - /opt/media/downloads:/downloads    # ← EDIT: same path as pilot/prism
+      - ${BEACON_CONFIG:-/opt/beacon}/haul:/config
+      - ${BEACON_DATA:-/srv/media}:/data
       # OPT-IN watch folder: when HAUL_TORRENT_WATCH_DIR is set above,
       # uncomment and edit the host path on the left to point at the
       # directory you'll drop .torrent files into.
@@ -250,7 +309,7 @@ services:
 #       - "6881:6881/tcp"
 #       - "6881:6881/udp"
 #     volumes:
-#       - ./config/gluetun:/gluetun
+#       - ${BEACON_CONFIG:-/opt/beacon}/gluetun:/gluetun
 #     configs:
 #       - source: gluetun-auth
 #         target: /gluetun/auth/config.toml

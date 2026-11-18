@@ -45,26 +45,50 @@ Pulse is the hub. Pilot, Prism, and Haul all register with it on startup. Pilot 
 
 **Prerequisites:** Docker Engine 24+ and Docker Compose v2.20+, 2 GB available RAM.
 
-### 1. Clone
+### 1. Download the compose file
+
+Put it in any folder. You don't need to clone anything.
 
 ```bash
-git clone https://github.com/beacon-stack/deploy.git
-cd deploy
+mkdir beacon && cd beacon
+curl -fsSLO https://raw.githubusercontent.com/beacon-stack/deploy/main/docker-compose.yml
 ```
 
-### 2. Edit your media paths
+### 2. Pick two folders
 
-Open `docker-compose.yml` and edit the three `← EDIT` lines to point at real directories on your host:
+Beacon needs two host paths, like Sonarr and Radarr:
 
-```yaml
-- /opt/media/tv:/tv                  # ← EDIT: your TV directory
-- /opt/media/movies:/movies          # ← EDIT: your movies directory
-- /opt/media/downloads:/downloads    # ← EDIT: your downloads directory
+| Setting | Default | What goes there |
+|---|---|---|
+| `BEACON_DATA` | `/srv/media` | Your media **and** downloads, in one folder |
+| `BEACON_CONFIG` | `/opt/beacon` | App databases and settings (keep it on a local disk) |
+
+Set them in a `.env` file next to `docker-compose.yml`:
+
+```bash
+cat > .env <<'EOF'
+BEACON_DATA=/srv/media
+BEACON_CONFIG=/opt/beacon
+EOF
 ```
 
-> **Same filesystem rule.** All three host paths must live on the same filesystem. Beacon uses hardlinks + atomic moves for imports — across filesystems it falls back to slow file copies that double your disk usage. The simplest layout is one root with three subdirs (e.g. `/opt/media/{tv,movies,downloads}`).
+Every app mounts `BEACON_DATA` at the same path, `/data`, and the first start creates this layout inside it:
 
-That's the only required edit. Every other knob in `docker-compose.yml` has a sensible default with a comment explaining what it does.
+```
+/data
+├── torrents
+│   ├── tv        ← Haul downloads TV here (Pilot sends category "tv")
+│   └── movies    ← …and movies here (Prism sends category "movies")
+└── media
+    ├── tv        ← Pilot's library, created automatically
+    └── movies    ← Prism's library, created automatically
+```
+
+> **Why one folder?** Imports are hardlinks: instant, and they use no extra space while the torrent seeds. Linux can only hardlink within a single mount, so separate mounts such as `/tv` and `/downloads` *always* copy, even when they're on the same disk. With one `/data` mount every app also sees the same paths, so you never need remote path mappings.
+
+> **Permissions.** The apps run as uid/gid 1000. Folders Beacon creates are given to `1000:1000`. If `BEACON_DATA` already exists and belongs to someone else, the `setup` step prints a warning; fix it with `sudo chown 1000:1000 <folder>`.
+
+> **Already have a library?** Point `BEACON_DATA` at the folder that contains it (for example a NAS share holding both `torrents/` and `media/`), then change the library path in Pilot or Prism under **Settings → Libraries**. Keep downloads on the same share so imports can hardlink.
 
 ### 3. Start
 
@@ -85,7 +109,9 @@ Everything should show `healthy`:
 - Prism → [http://localhost:8282](http://localhost:8282)
 - Haul → [http://localhost:8484](http://localhost:8484)
 
-Each service generates its own API key on first run and stores it in its SQLite DB (`./config/<app>/<app>.db`). The key is surfaced in the UI under **Settings → General** with a **Regenerate** button — the same pattern Sonarr and Radarr use. External tools (Homepage, Home Assistant, Radarr v3 clients) read it from there.
+On your own network the UIs open straight away, with no login (like Sonarr's "Authentication Required: Disabled for Local Addresses"). To reach them from outside your network, set a username and password under **Settings → App Settings → Security**.
+
+Each service generates its own API key on first run and stores it in its SQLite DB (`$BEACON_CONFIG/<app>/<app>.db`). The key is surfaced in the UI under **Settings → General** with a **Regenerate** button — the same pattern Sonarr and Radarr use. External tools (Homepage, Home Assistant, Radarr v3 clients) read it from there.
 
 ---
 
@@ -131,12 +157,7 @@ Each port-mapping line follows the pattern `"HOST:CONTAINER"`. Change the left n
 
 ### Config storage
 
-Each service's `/config` directory holds its SQLite database (`<app>.db`), settings, and per-app cached state. Defaults to `./config/<app>` next to the compose file. To move configs to a different volume (faster SSD, NAS share, etc.), edit the volume mount on the host side:
-
-```yaml
-volumes:
-  - /var/lib/beacon/pulse:/config
-```
+Each service's `/config` directory holds its SQLite database (`<app>.db`), settings, and per-app cached state, at `$BEACON_CONFIG/<app>` (default `/opt/beacon/<app>`). To move it, stop the stack, move the folder, and change `BEACON_CONFIG` in `.env`. Keep it on a local disk: SQLite on a network share risks corruption.
 
 ### Timezone
 
@@ -289,7 +310,7 @@ docker logs pilot | grep "TMDB metadata client"
 ## Troubleshooting
 
 **A service never goes healthy**
-- `docker compose logs <service>` names the problem. Common: another process already on the port; the bind-mounted media path doesn't exist; insufficient permissions to write to `./config/<app>`.
+- `docker compose logs <service>` names the problem. Common: another process already on the port; the bind-mounted media path doesn't exist; insufficient permissions to write to `$BEACON_CONFIG/<app>` or `$BEACON_DATA` (see the `setup` container's log: `docker compose logs setup`).
 
 **Indexer or download client added in Pulse doesn't show up in Pilot/Prism**
 - Pilot and Prism sync from Pulse on a 30-second poll, plus a push hook on save. Wait up to 30 seconds, or check `docker compose logs pilot` / `prism` for `pulse: indexer sync complete` lines. Synced entries appear with a Pulse marker and are read-only in the consumer's UI.
@@ -313,13 +334,13 @@ docker logs pilot | grep "TMDB metadata client"
 - If another host service uses 9696, 8383, 8282, or 8484, change the corresponding host port (left of the colon) in the relevant `ports:` block.
 
 **Starting over**
-- Stop the stack with `docker compose down`. Delete `./config/<app>/<app>.db` for any service you want to wipe, then `docker compose up -d`. Each service runs goose migrations to recreate an empty schema and generates a new API key on first run.
+- Stop the stack with `docker compose down`. Delete `$BEACON_CONFIG/<app>/<app>.db` for any service you want to wipe, then `docker compose up -d`. Each service runs goose migrations to recreate an empty schema and generates a new API key on first run.
 
 ---
 
 ## Development
 
-Clone this repo alongside `pulse/`, `pilot/`, `prism/`, `haul/` (i.e., all under one parent directory). `docker-compose.dev.yml` adds `build: ../<repo>` to each service so each `docker compose up -d --build` rebuilds against your local source. App configs and SQLite DBs land in `./config/<app>` next to the compose file (gitignored), so rebuilds don't wipe your UI settings.
+Clone this repo alongside `pulse/`, `pilot/`, `prism/`, `haul/` (i.e., all under one parent directory). `docker-compose.dev.yml` adds `build: ../<repo>` to each service so each `docker compose up -d --build` rebuilds against your local source. App configs and SQLite DBs land in `$BEACON_CONFIG/<app>` as usual, so rebuilds don't wipe your UI settings.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
